@@ -1112,7 +1112,7 @@ ExternalToolsLauncherDialog.prototype.onExportTools = function () {
    sfd.caption     = "Export Tools — " + SCRIPT_NAME;
    sfd.filters     = [ [ "JSON files (*.json)", "*.json" ],
                         [ "All files (*.*)",     "*.*"    ] ];
-   sfd.fileName    = SCRIPT_NAME + "_tools.json";
+   sfd.initialPath = SCRIPT_NAME + "_tools.json";
    if ( !sfd.execute() ) return;
 
    var path = sfd.fileName;
