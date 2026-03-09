@@ -710,9 +710,22 @@ function ExternalToolsLauncherDialog() {
       }
    };
 
+   this.exportButton           = new PushButton( this );
+   this.exportButton.text      = "Export\u2026";
+   this.exportButton.toolTip   = "Save the current tool list to a JSON file.";
+   this.exportButton.onClick   = function () { self.onExportTools(); };
+
+   this.importButton           = new PushButton( this );
+   this.importButton.text      = "Import\u2026";
+   this.importButton.toolTip   = "Load tools from a previously exported JSON file.";
+   this.importButton.onClick   = function () { self.onImportTools(); };
+
    var bottomRow = new HorizontalSizer;
    bottomRow.spacing = 6;
    bottomRow.add( this.resetButton );
+   bottomRow.addSpacing( 8 );
+   bottomRow.add( this.exportButton );
+   bottomRow.add( this.importButton );
    bottomRow.addStretch();
    bottomRow.add( this.okButton );
    bottomRow.add( this.cancelButton );
@@ -1085,6 +1098,101 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
  * Append text to the console TextBox.
  * @param {String} text
  */
+/** Export the current tool list to a user-chosen JSON file. */
+ExternalToolsLauncherDialog.prototype.onExportTools = function () {
+   if ( this.tools.length === 0 ) {
+      ( new MessageBox(
+         "There are no tools to export.",
+         SCRIPT_NAME, StdIcon_Information, StdButton_Ok
+      ) ).execute();
+      return;
+   }
+
+   var sfd         = new SaveFileDialog;
+   sfd.caption     = "Export Tools — " + SCRIPT_NAME;
+   sfd.filters     = [ [ "JSON files (*.json)", "*.json" ],
+                        [ "All files (*.*)",     "*.*"    ] ];
+   sfd.fileName    = SCRIPT_NAME + "_tools.json";
+   if ( !sfd.execute() ) return;
+
+   var path = sfd.fileName;
+   if ( File.extractExtension( path ) === "" )
+      path += ".json";
+
+   try {
+      var payload = [];
+      for ( var i = 0; i < this.tools.length; ++i )
+         payload.push( this.tools[i].toObject() );
+      File.writeTextFile( path, JSON.stringify( payload, null, 3 ) );
+      Console.writeln( SCRIPT_NAME + ": Exported " + this.tools.length + " tool(s) to: " + path );
+   } catch ( ex ) {
+      ( new MessageBox(
+         "Failed to write export file:\n\n" + ex.message,
+         SCRIPT_NAME, StdIcon_Error, StdButton_Ok
+      ) ).execute();
+   }
+};
+
+/** Import tools from a user-chosen JSON file, with replace-or-append choice. */
+ExternalToolsLauncherDialog.prototype.onImportTools = function () {
+   var ofd      = new OpenFileDialog;
+   ofd.caption  = "Import Tools — " + SCRIPT_NAME;
+   ofd.filters  = [ [ "JSON files (*.json)", "*.json" ],
+                    [ "All files (*.*)",     "*.*"    ] ];
+   ofd.multipleSelections = false;
+   if ( !ofd.execute() ) return;
+
+   var imported;
+   try {
+      var raw = File.readTextFile( ofd.fileName );
+      var parsed = JSON.parse( raw );
+      if ( !Array.isArray( parsed ) )
+         throw new Error( "File does not contain a JSON array." );
+      imported = [];
+      for ( var i = 0; i < parsed.length; ++i )
+         imported.push( ToolEntry.fromObject( parsed[i] ) );
+   } catch ( ex ) {
+      ( new MessageBox(
+         "Failed to read or parse the import file:\n\n" + ex.message,
+         SCRIPT_NAME, StdIcon_Error, StdButton_Ok
+      ) ).execute();
+      return;
+   }
+
+   if ( imported.length === 0 ) {
+      ( new MessageBox(
+         "The selected file contains no tool entries.",
+         SCRIPT_NAME, StdIcon_Information, StdButton_Ok
+      ) ).execute();
+      return;
+   }
+
+   // Ask replace vs append only when there are existing tools.
+   if ( this.tools.length > 0 ) {
+      var mb = new MessageBox(
+         "<p>Import " + imported.length + " tool(s) from file.</p>" +
+         "<p>Replace the current list, or append to it?</p>",
+         SCRIPT_NAME, StdIcon_Question,
+         StdButton_Yes,    // Replace
+         StdButton_No,     // Append
+         StdButton_Cancel
+      );
+      mb.defaultButton = StdButton_No; // safer default
+      var answer = mb.execute();
+      if ( answer === StdButton_Cancel ) return;
+      if ( answer === StdButton_Yes )
+         this.tools = imported;
+      else
+         this.tools = this.tools.concat( imported );
+   } else {
+      this.tools = imported;
+   }
+
+   this.rebuildTree();
+   this.updateButtonStates();
+   Console.writeln( SCRIPT_NAME + ": Imported " + imported.length + " tool(s) from: " + ofd.fileName );
+};
+
 ExternalToolsLauncherDialog.prototype.appendConsole = function ( text ) {
    this.consoleTextBox.text += text;
 };
