@@ -32,7 +32,7 @@
 var SCRIPT_NAME    = "ExternalToolsLauncher";
 var SCRIPT_VERSION = "1.0.0";
 var SETTINGS_KEY   = "ExternalToolsLauncher"; // Namespace for Settings persistence
-var DEFAULT_TIMEOUT_SEC = 60;                  // Default process timeout in seconds
+var DEFAULT_TIMEOUT_SEC = 0;                   // Default process timeout in seconds (0 = no timeout)
 var POLL_INTERVAL_MS    = 100;                 // ExternalProcess polling cadence
 
 // =============================================================================
@@ -230,6 +230,20 @@ function normalizePath( p ) {
  */
 function fileExists( path ) {
    return File.exists( path );
+}
+
+/**
+ * Return the last-modified timestamp of a file as milliseconds since epoch,
+ * or 0 if the file cannot be stat'd.
+ * @param  {String} path  Normalized path.
+ * @returns {Number}
+ */
+function fileMtime( path ) {
+   try {
+      return new FileInfo( path ).lastModified.valueOf();
+   } catch ( _ ) {
+      return 0;
+   }
 }
 
 // =============================================================================
@@ -583,16 +597,16 @@ function ExternalToolsLauncherDialog() {
    // Launch options row (timeout only — FITS export is inferred from args)
    // ------------------------------------------------------------------
    var timeoutLabel            = new Label( this );
-   timeoutLabel.text           = "Timeout (s):";
+   timeoutLabel.text           = "Timeout (s, 0=none):";
    timeoutLabel.textAlignment  = TextAlign_Right | TextAlign_VertCenter;
 
    this.timeoutSpinBox         = new SpinBox( this );
-   this.timeoutSpinBox.minimum = 1;
-   this.timeoutSpinBox.maximum = 3600;
+   this.timeoutSpinBox.minimum = 0;
+   this.timeoutSpinBox.maximum = 86400;
    this.timeoutSpinBox.value   = DEFAULT_TIMEOUT_SEC;
    this.timeoutSpinBox.toolTip =
-      "Maximum number of seconds to wait for the launched process to finish.\n" +
-      "The process is forcibly terminated if this limit is exceeded.";
+      "Maximum seconds to wait for the process to finish before forcibly terminating it.\n" +
+      "Set to 0 for no timeout — recommended for interactive or GUI tools.";
 
    var optionsRow = new HorizontalSizer;
    optionsRow.spacing = 8;
@@ -909,6 +923,9 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
       }
    }
 
+   // Snapshot mtime immediately after export so we can detect external edits.
+   var mtimeBefore = fitsPath !== "" ? fileMtime( normalizePath( fitsPath ) ) : 0;
+
    // ---- Normalize all paths to forward slashes (PJSR requirement on Windows) ----
    var exePath  = normalizePath( tool.executable );
    var wdirPath = normalizePath( tool.workingDir );
@@ -976,7 +993,7 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
    }
 
    // ---- Poll loop — keeps the UI responsive ----
-   var timeoutMs = this.timeoutSpinBox.value * 1000;
+   var timeoutMs = this.timeoutSpinBox.value * 1000; // 0 = no timeout
    var elapsed   = 0;
    var timedOut  = false;
 
@@ -985,7 +1002,7 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
       elapsed += POLL_INTERVAL_MS;
       processEvents(); // yield to the UI event loop
 
-      if ( elapsed >= timeoutMs ) {
+      if ( timeoutMs > 0 && elapsed >= timeoutMs ) {
          timedOut = true;
          break;
       }
@@ -1032,6 +1049,30 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
    Console.writeln(
       SCRIPT_NAME + ": Process '" + tool.name + "' finished — exit code " + exitCode
    );
+
+   // ---- Offer to reimport if the external tool modified the FITS file ----
+   if ( fitsPath !== "" ) {
+      var normalFitsPath = normalizePath( fitsPath );
+      if ( fileMtime( normalFitsPath ) !== mtimeBefore ) {
+         var reimportMb = new MessageBox(
+            "<p>The external tool modified the FITS file.</p>" +
+            "<p>Import the result into PixInsight?</p>",
+            SCRIPT_NAME, StdIcon_Question, StdButton_Yes, StdButton_No
+         );
+         if ( reimportMb.execute() === StdButton_Yes ) {
+            var newWindows = ImageWindow.open( normalFitsPath );
+            if ( newWindows.length > 0 ) {
+               newWindows[0].show();
+               Console.writeln( SCRIPT_NAME + ": Imported modified FITS as new image window." );
+            } else {
+               ( new MessageBox(
+                  "Could not open the modified FITS file:\n" + normalFitsPath,
+                  SCRIPT_NAME, StdIcon_Error, StdButton_Ok
+               ) ).execute();
+            }
+         }
+      }
+   }
 };
 
 /**
