@@ -32,7 +32,6 @@
 var SCRIPT_NAME    = "ExternalToolsLauncher";
 var SCRIPT_VERSION = "1.0.0";
 var SETTINGS_KEY   = "ExternalToolsLauncher"; // Namespace for Settings persistence
-var DEFAULT_TIMEOUT_SEC = 0;                   // Default process timeout in seconds (0 = no timeout)
 var POLL_INTERVAL_MS    = 100;                 // ExternalProcess polling cadence
 
 // =============================================================================
@@ -50,13 +49,15 @@ var POLL_INTERVAL_MS    = 100;                 // ExternalProcess polling cadenc
  *                               {filename_noext} — filename of active image without extension
  * @param {String} workingDir  Optional working-directory override.
  * @param {String} description Optional tooltip / notes.
+ * @param {Number} timeout     Seconds before the process is force-killed (0 = no timeout).
  */
-function ToolEntry( name, executable, args, workingDir, description ) {
+function ToolEntry( name, executable, args, workingDir, description, timeout ) {
    this.name        = name        || "";
    this.executable  = executable  || "";
    this.arguments   = args        || "";
    this.workingDir  = workingDir  || "";
    this.description = description || "";
+   this.timeout     = ( timeout !== undefined && timeout !== null ) ? Number( timeout ) : 0;
 }
 
 /** Return a shallow copy of this entry. */
@@ -66,7 +67,8 @@ ToolEntry.prototype.clone = function () {
       this.executable,
       this.arguments,
       this.workingDir,
-      this.description
+      this.description,
+      this.timeout
    );
 };
 
@@ -77,7 +79,8 @@ ToolEntry.prototype.toObject = function () {
       executable  : this.executable,
       arguments   : this.arguments,
       workingDir  : this.workingDir,
-      description : this.description
+      description : this.description,
+      timeout     : this.timeout
    };
 };
 
@@ -88,7 +91,8 @@ ToolEntry.fromObject = function ( obj ) {
       obj.executable  || "",
       obj.arguments   || "",
       obj.workingDir  || "",
-      obj.description || ""
+      obj.description || "",
+      obj.timeout     || 0
    );
 };
 
@@ -294,7 +298,7 @@ function ToolEditDialog( parent, tool ) {
    var self = this;
 
    // Work on a clone so the caller's data is unchanged unless we commit.
-   this.tool = tool ? tool.clone() : new ToolEntry( "", "", "{fits_path}", "{output_dir}", "" );
+   this.tool = tool ? tool.clone() : new ToolEntry( "", "", "{fits_path}", "{output_dir}", "", 0 );
 
    this.windowTitle = tool ? "Edit Tool — " + SCRIPT_NAME
                            : "Add Tool — " + SCRIPT_NAME;
@@ -416,6 +420,28 @@ function ToolEditDialog( parent, tool ) {
    descRow.add( descLabel );
    descRow.add( this.descEdit, 100 );
 
+   // ---- Timeout ----
+   var timeoutLabel        = makeRow( "Timeout (s):", LABEL_W );
+   this.timeoutSpinBox     = new SpinBox( this );
+   this.timeoutSpinBox.minimum  = 0;
+   this.timeoutSpinBox.maximum  = 86400;
+   this.timeoutSpinBox.value    = this.tool.timeout;
+   this.timeoutSpinBox.toolTip  =
+      "Seconds to wait before forcibly terminating the process.\n" +
+      "Set to 0 for no timeout — recommended for interactive or GUI tools.";
+
+   var timeoutHint             = new Label( this );
+   timeoutHint.text            = "(0 = no timeout)";
+   timeoutHint.textAlignment   = TextAlign_Left | TextAlign_VertCenter;
+   timeoutHint.styleSheet      = "color: gray; font-style: italic;";
+
+   var timeoutRow = new HorizontalSizer;
+   timeoutRow.spacing = 6;
+   timeoutRow.add( timeoutLabel );
+   timeoutRow.add( this.timeoutSpinBox );
+   timeoutRow.add( timeoutHint );
+   timeoutRow.addStretch();
+
    // ---- Separator ----
    var sep       = new Frame( this );
    sep.minHeight = 1;
@@ -453,6 +479,7 @@ function ToolEditDialog( parent, tool ) {
       self.tool.arguments   = self.argsEdit.text;
       self.tool.workingDir  = self.wdirEdit.text.trim();
       self.tool.description = self.descEdit.text;
+      self.tool.timeout     = self.timeoutSpinBox.value;
 
       self.ok();
    };
@@ -478,6 +505,7 @@ function ToolEditDialog( parent, tool ) {
    this.sizer.add( tokenRow );
    this.sizer.add( wdirRow );
    this.sizer.add( descRow );
+   this.sizer.add( timeoutRow );
    this.sizer.addSpacing( 4 );
    this.sizer.add( sep );
    this.sizer.addSpacing( 2 );
@@ -594,27 +622,6 @@ function ExternalToolsLauncherDialog() {
    treeSection.add( sidebarSizer );
 
    // ------------------------------------------------------------------
-   // Launch options row (timeout only — FITS export is inferred from args)
-   // ------------------------------------------------------------------
-   var timeoutLabel            = new Label( this );
-   timeoutLabel.text           = "Timeout (s, 0=none):";
-   timeoutLabel.textAlignment  = TextAlign_Right | TextAlign_VertCenter;
-
-   this.timeoutSpinBox         = new SpinBox( this );
-   this.timeoutSpinBox.minimum = 0;
-   this.timeoutSpinBox.maximum = 86400;
-   this.timeoutSpinBox.value   = DEFAULT_TIMEOUT_SEC;
-   this.timeoutSpinBox.toolTip =
-      "Maximum seconds to wait for the process to finish before forcibly terminating it.\n" +
-      "Set to 0 for no timeout — recommended for interactive or GUI tools.";
-
-   var optionsRow = new HorizontalSizer;
-   optionsRow.spacing = 8;
-   optionsRow.addStretch();
-   optionsRow.add( timeoutLabel );
-   optionsRow.add( this.timeoutSpinBox );
-
-   // ------------------------------------------------------------------
    // Launch button
    // ------------------------------------------------------------------
    this.launchButton           = new PushButton( this );
@@ -719,7 +726,6 @@ function ExternalToolsLauncherDialog() {
    this.sizer.add( titleLabel );
    this.sizer.addSpacing( 2 );
    this.sizer.add( treeSection, 50 );
-   this.sizer.add( optionsRow );
    this.sizer.add( launchRow );
    this.sizer.add( consoleTitleRow );
    this.sizer.add( this.consoleTextBox, 50 );
@@ -993,7 +999,7 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
    }
 
    // ---- Poll loop — keeps the UI responsive ----
-   var timeoutMs = this.timeoutSpinBox.value * 1000; // 0 = no timeout
+   var timeoutMs = tool.timeout * 1000; // 0 = no timeout
    var elapsed   = 0;
    var timedOut  = false;
 
@@ -1011,7 +1017,7 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
    if ( timedOut ) {
       try { proc.terminate(); } catch ( _ ) {}
       var timeoutMsg =
-         "[TIMEOUT] Process exceeded " + this.timeoutSpinBox.value +
+         "[TIMEOUT] Process exceeded " + tool.timeout +
          " second(s) and was forcibly terminated.\n";
       this.appendConsole( timeoutMsg );
       Console.warningln( SCRIPT_NAME + ": " + timeoutMsg.trim() );
