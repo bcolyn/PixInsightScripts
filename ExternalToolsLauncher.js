@@ -280,7 +280,7 @@ function ToolEditDialog( parent, tool ) {
    var self = this;
 
    // Work on a clone so the caller's data is unchanged unless we commit.
-   this.tool = tool ? tool.clone() : new ToolEntry();
+   this.tool = tool ? tool.clone() : new ToolEntry( "", "", "{fits_path}", "{output_dir}", "" );
 
    this.windowTitle = tool ? "Edit Tool — " + SCRIPT_NAME
                            : "Add Tool — " + SCRIPT_NAME;
