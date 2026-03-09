@@ -1171,7 +1171,7 @@ ExternalToolsLauncherDialog.prototype.onImportTools = function () {
    if ( this.tools.length > 0 ) {
       var mb = new MessageBox(
          "<p>Import " + imported.length + " tool(s) from file.</p>" +
-         "<p>Replace the current list, or append to it?</p>",
+         "<p>Replace the current list? (No = append to it)</p>",
          SCRIPT_NAME, StdIcon_Question,
          StdButton_Yes,    // Replace
          StdButton_No,     // Append
