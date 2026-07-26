@@ -1,11 +1,31 @@
 #engine v8
 /*
- * Aster for PixInsight -- a V8-runtime PJSR port of Aster v1.0.0 (Siril/sirilpy)
- * by stefos.tzortzis@gmail.com
+ * Aster for PixInsight -- a V8-runtime PJSR port of Aster v1.2.0 (Siril/sirilpy)
+ *
+ * Original tool: Aster, by Stefos Tzortzis <stefos.tzortzis@gmail.com>, for
+ * Siril/sirilpy. This is an unofficial, independent port of the published
+ * algorithm to PixInsight scripting -- not an official Pleiades or Siril
+ * product, and not endorsed by the original author.
+ *
+ * Targets PixInsight 1.9.4 "Lockhart"'s V8 JavaScript runtime, which makes
+ * plain-JS per-pixel work (flood-fill labeling, hand-rolled convolution)
+ * fast enough to be practical. Operates directly on pixel data via the
+ * ImageIterator class (a typed-array view straight onto the image's own
+ * pixel buffer), so it follows the original numpy/scipy algorithm closely
+ * instead of working around what PixelMath expressions can express.
+ *
+ * Ported from v1.2.0, which reworked star detection around a single shared
+ * catalog (background + connected components computed once, reused by glow
+ * and both spike layers) and added: user-set black/white detection levels
+ * replacing the old automatic sigma threshold; a JWST-style 6+2-arm spike
+ * pattern alongside the classic 4-arm Newtonian one; optional spectral
+ * (rainbow) diffraction tinting; a second, +45-degree-offset spike layer;
+ * and independent exclusion-mask toggles for glow vs. spikes. See the
+ * notes at the end of this file for what was ported as-is, reshaped, or
+ * deliberately left out, and why.
  *
  * Run on a stars-only, nonlinear (stretched) image or Preview -- same
- * precondition as the original script. Note that the glow effect can take a long
- * time on the full image.
+ * precondition as the original script.
  *
  * License: GPL-3.0-or-later (matching the source script's license)
  */
@@ -18,41 +38,67 @@
 CoreApplication.ensureMinimumVersion(1, 9, 4);
 
 // ---------------------------------------------------------------------------
-// Parameters (defaults mirror the original script's reset_controls())
+// Parameters (defaults mirror v1.2.0's reset_controls())
 // ---------------------------------------------------------------------------
 
 function AsterParameters() {
+   // Shared star detection (feeds glow, primary spikes, secondary spikes).
+   this.detectionBlack = 0.20; // 0..0.99
+   this.detectionWhite = 0.90; // detectionBlack+0.01..1.0
+
    this.glowEnabled = true;
    this.glow = {
-      minDiameter: 40.0,
-      feather:     35.0,
-      radius:      8.0,
+      minDiameter: 15.0,
+      feather:     20.0,
+      radius:      10.0,
       strength:    0.50,
       gamma:       0.70,
       blend:       1.00,
-      blurMode:    "Moffat", // Gaussian | Box | Disk | Triangle | Moffat | Photographic
-      downsample:  1         // 1 = off (full-res blur, matches earlier behaviour exactly).
-                              // 2/4/8 blur at 1/factor working resolution and bilinear-
-                              // upsample back -- visually near-identical for wide kernels,
-                              // roughly factor^2 cheaper for Disk/Moffat, factor cheaper
-                              // for the separable modes. Push it up if a large glow radius
-                              // is the bottleneck; there's no reason to go above ~radius/3
-                              // (much beyond that the kernel itself becomes too coarse to
-                              // represent at the reduced resolution).
+      blurMode:    "Moffat", // Gaussian | Box | Disk | Triangle | Moffat | Multi-scale Gaussian
+      downsample:  1         // 1 = off (full-res blur, matches v1.2.0 exactly). Not part of the
+                              // original script -- see PERFORMANCE NOTES at the end of this file.
    };
 
    this.spikesEnabled = false;
    this.spike = {
-      minDiameter: 80.0,
-      feather:     40.0,
-      strength:    0.50,
+      minDiameter: 20.0,
+      feather:     30.0,
+      strength:    0.80,
       length:      400.0,
       width:       2.0,
       angle:       0.0,
-      blend:       1.00
+      blend:       1.00,
+      spikeType:   "Newtonian", // Newtonian | JWST
+      spectral:            false,
+      spectralStrength:    0.55,
+      spectralSaturation:  0.80,
+      // Fixed in v1.2.0's own UI too ("the more natural checkbox-only look
+      // from the first spectral prototype") -- not exposed as controls.
+      spectralPosition:   0.28,
+      spectralSpread:     0.18,
+      spectralSmoothness: 0.91,
+      perArmVariation:    0.04
    };
 
-   this.thresholdSigma = 3.5; // shared robust-threshold multiplier
+   // Secondary spikes: a second, softer 4-arm layer offset +45 degrees from
+   // the primary. Always classic Newtonian (no spike type or spectral
+   // options), and reuses the primary spike's angle/blend rather than
+   // having its own -- matching v1.2.0's secondary_spike_parameters(),
+   // which literally reads self.spike_angle_spin/self.spike_blend_spin.
+   this.secondaryEnabled = false;
+   this.secondary = {
+      minDiameter: 20.0,
+      feather:     10.0,
+      strength:    0.40,
+      length:      80.0,
+      width:       4.0
+   };
+
+   // Independent exclusion-mask gating per stage (v1.2.0's mask_glow_checkbox
+   // / mask_spikes_checkbox, both default on). Secondary spikes share the
+   // "spikes" gate, matching the original (mask_spikes applies to both).
+   this.maskGlow   = true;
+   this.maskSpikes = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,19 +126,18 @@ function median(arr) {
    return (n % 2) ? tmp[(n - 1) / 2] : 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
 }
 
-function percentile(arr, p) {
-   var tmp = arr.slice();
-   tmp.sort();
-   var idx = clamp(FMath.round(p * (tmp.length - 1)), 0, tmp.length - 1);
-   return tmp[idx];
-}
-
-function medianAbsDeviation(arr, med) {
+// Deterministic stride subsample, capped at maxSamples. A few hundred
+// thousand samples give a median estimate that's practically identical to
+// sorting the full array for a single background statistic, while cutting
+// sort cost sharply on large frames.
+function subsample(arr, maxSamples) {
    var n = arr.length;
-   var dev = new Float32Array(n);
-   for (var i = 0; i < n; ++i)
-      dev[i] = FMath.abs(arr[i] - med);
-   return median(dev);
+   if (n <= maxSamples) return arr;
+   var stride = FMath.ceil(n / maxSamples);
+   var out = new Float32Array(FMath.ceil(n / stride));
+   var j = 0;
+   for (var i = 0; i < n; i += stride) out[j++] = arr[i];
+   return out.subarray(0, j);
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +146,7 @@ function medianAbsDeviation(arr, med) {
 // per PixInsight's V8 runtime docs). Handles both floating-point images
 // (sample == real value) and integer images (sample is in the format's
 // nominal range, converted through toReal()/toSample()) -- mirroring the
-// original Python script's normalize_image()/denormalize_image() step,
-// which this port had skipped until now by assuming float-only input.
+// original Python script's normalize_image()/denormalize_image() step.
 //
 // Separate integer/float loop variants match the documented pattern:
 // branching per-pixel on isInteger inside the inner loop defeats some JIT
@@ -205,38 +249,17 @@ function luminance(img) {
 }
 
 // ---------------------------------------------------------------------------
-// Robust threshold + connected-component labeling
-// (mirrors select_stars()/detect_star_emitters()'s shared front half)
+// Connected components
 // ---------------------------------------------------------------------------
 
-// Deterministic stride subsample, capped at maxSamples. A few hundred
-// thousand samples give a median/MAD estimate that's practically identical
-// to sorting the full array for this purpose (a background/noise
-// threshold, not a per-pixel decision -- pixel classification below still
-// uses the full-resolution lum array), while cutting sort cost sharply on
-// large frames.
-function subsample(arr, maxSamples) {
-   var n = arr.length;
-   if (n <= maxSamples) return arr;
-   var stride = FMath.ceil(n / maxSamples);
-   var out = new Float32Array(FMath.ceil(n / stride));
-   var j = 0;
-   for (var i = 0; i < n; i += stride) out[j++] = arr[i];
-   return out.subarray(0, j);
-}
-
-function robustThreshold(lum, sigmaK) {
-   var sample = subsample(lum, 400000);
-   var bg = median(sample);
-   var sigma = FMath.max(1.4826 * medianAbsDeviation(sample, bg), 1e-6);
-   var thr = FMath.max(bg + sigmaK * sigma, percentile(sample, 0.82));
-   return { bg: bg, sigma: sigma, threshold: thr };
-}
-
-// 2x2-block erosion + cross dilation, approximating the original's
-// ndi.binary_opening(structure=ones((2,2))) + ndi.binary_dilation(iterations=1).
-function cleanupMask(mask, w, h) {
-   var eroded = new Uint8Array(w * h);
+// 2x2-block erosion/dilation pair, matching ndi.binary_opening(structure=
+// ones((2,2))) exactly (same structuring element for both steps, unlike an
+// earlier draft of this port which paired a 2x2 erosion with a cross
+// dilation to approximate v1.0.0's extra dilation pass -- v1.2.0 dropped
+// that extra pass entirely: "No dilation is used, so nearby halos are not
+// joined").
+function erode2x2(mask, w, h) {
+   var out = new Uint8Array(w * h);
    for (var y = 0; y < h; ++y) {
       for (var x = 0; x < w; ++x) {
          var idx = y * w + x;
@@ -244,22 +267,29 @@ function cleanupMask(mask, w, h) {
          var b = (x + 1 < w) ? mask[idx + 1] : 0;
          var c = (y + 1 < h) ? mask[idx + w] : 0;
          var d = (x + 1 < w && y + 1 < h) ? mask[idx + w + 1] : 0;
-         eroded[idx] = (a && b && c && d) ? 1 : 0;
+         out[idx] = (a && b && c && d) ? 1 : 0;
       }
    }
-   var dilated = new Uint8Array(w * h);
+   return out;
+}
+
+function dilate2x2(mask, w, h) {
+   var out = new Uint8Array(w * h);
    for (var y = 0; y < h; ++y) {
       for (var x = 0; x < w; ++x) {
          var idx = y * w + x;
-         var v = eroded[idx];
-         if (!v && x > 0) v = eroded[idx - 1];
-         if (!v && x + 1 < w) v = eroded[idx + 1];
-         if (!v && y > 0) v = eroded[idx - w];
-         if (!v && y + 1 < h) v = eroded[idx + w];
-         dilated[idx] = v ? 1 : 0;
+         var a = mask[idx];
+         var b = (x - 1 >= 0) ? mask[idx - 1] : 0;
+         var c = (y - 1 >= 0) ? mask[idx - w] : 0;
+         var d = (x - 1 >= 0 && y - 1 >= 0) ? mask[idx - w - 1] : 0;
+         out[idx] = (a || b || c || d) ? 1 : 0;
       }
    }
-   return dilated;
+   return out;
+}
+
+function cleanupMask(mask, w, h) {
+   return dilate2x2(erode2x2(mask, w, h), w, h);
 }
 
 // 4-connected flood-fill labeling (matches scipy.ndimage.label's default
@@ -324,36 +354,101 @@ function maxFilter3(arr, w, h) {
    return out;
 }
 
-// Diameter-weighted smoothstep selection over labeled components, exactly
-// mirroring the original's `t*t*(3-2*t)` feathered cutoff by equivalent
-// circular diameter. Returns per-pixel selection weight (0..1) plus the
-// per-label diameter/weight tables (spikes reuse these).
-function diameterSelection(labels, count, w, h, minDiameter, feather) {
-   var areas = new Float64Array(count + 1);
-   var n = w * h;
+// Per-label bounding box (min/max x/y), computed once and reused for every
+// star's local core-ball refinement and colour sampling -- matches v1.2.0's
+// own use of ndi.find_objects() for the same purpose ("Expand the exact
+// component bounding box so local morphology has the same border context
+// as the former full-image implementation").
+function computeLabelBounds(labels, count, w, h) {
+   var minX = new Int32Array(count + 1).fill(w);
+   var maxX = new Int32Array(count + 1).fill(-1);
+   var minY = new Int32Array(count + 1).fill(h);
+   var maxY = new Int32Array(count + 1).fill(-1);
+   for (var y = 0; y < h; ++y) {
+      var row = y * w;
+      for (var x = 0; x < w; ++x) {
+         var l = labels[row + x];
+         if (!l) continue;
+         if (x < minX[l]) minX[l] = x;
+         if (x > maxX[l]) maxX[l] = x;
+         if (y < minY[l]) minY[l] = y;
+         if (y > maxY[l]) maxY[l] = y;
+      }
+   }
+   return { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
+}
+
+// ---------------------------------------------------------------------------
+// Star catalog -- one shared detection pass reused by glow, primary spikes
+// and secondary spikes. Matches v1.2.0's build_star_catalog(): detection
+// now runs on levels-adjusted luminance against a fixed 0.05 threshold,
+// replacing v1.0.0's automatic median+MAD sigma threshold with two
+// user-set black/white points.
+// ---------------------------------------------------------------------------
+
+function buildStarCatalog(img, detectionBlack, detectionWhite) {
+   var w = img.width, h = img.height, n = w * h;
+   detectionBlack = clamp(detectionBlack, 0, 0.99);
+   detectionWhite = clamp(detectionWhite, detectionBlack + 0.01, 1.0);
+
+   var lum = luminance(img);
+   var background = median(subsample(lum, 400000));
+
+   var detectionLum = new Float32Array(n);
+   var invRange = 1 / FMath.max(detectionWhite - detectionBlack, 1e-6);
    for (var i = 0; i < n; ++i)
-      if (labels[i]) areas[labels[i]]++;
+      detectionLum[i] = clamp((lum[i] - detectionBlack) * invRange, 0, 1);
+
+   var mask = new Uint8Array(n);
+   for (var i = 0; i < n; ++i) mask[i] = detectionLum[i] > 0.05 ? 1 : 0;
+   mask = cleanupMask(mask, w, h);
+
+   var lbl = labelComponents(mask, w, h);
+   var labels = lbl.labels, count = lbl.count;
 
    var diameters = new Float64Array(count + 1);
-   for (var l = 1; l <= count; ++l)
-      diameters[l] = 2.0 * FMath.sqrt(areas[l] / FMath.PI);
+   var peaks = new Float64Array(count + 1);
+   var bounds = null;
 
+   if (count > 0) {
+      var areas = new Float64Array(count + 1);
+      for (var i = 0; i < n; ++i) {
+         var l = labels[i];
+         if (!l) continue;
+         areas[l]++;
+         if (lum[i] > peaks[l]) peaks[l] = lum[i];
+      }
+      for (var l = 1; l <= count; ++l) diameters[l] = 2.0 * FMath.sqrt(areas[l] / FMath.PI);
+      bounds = computeLabelBounds(labels, count, w, h);
+   }
+
+   return {
+      width: w, height: h, lum: lum, labels: labels, count: count,
+      diameters: diameters, peaks: peaks, bounds: bounds, background: background
+   };
+}
+
+// Per-component and per-pixel smooth diameter weights. Matches v1.2.0's
+// component_selection(), shared between select_stars() and
+// detect_star_emitters().
+function componentSelection(catalog, minDiameter, feather) {
+   var w = catalog.width, h = catalog.height, count = catalog.count;
    var halfFeather = FMath.max(feather, 0.1) * 0.5;
    var low = FMath.max(0.0, minDiameter - halfFeather);
    var high = FMath.max(low + 1e-6, minDiameter + halfFeather);
 
    var weights = new Float64Array(count + 1);
    for (var l = 1; l <= count; ++l) {
-      var t = clamp((diameters[l] - low) / (high - low), 0, 1);
+      var t = clamp((catalog.diameters[l] - low) / (high - low), 0, 1);
       weights[l] = t * t * (3 - 2 * t);
    }
 
-   var selection = new Float32Array(n);
-   for (var i = 0; i < n; ++i)
-      selection[i] = labels[i] ? weights[labels[i]] : 0;
+   var selection = new Float32Array(w * h);
+   for (var i = 0; i < w * h; ++i)
+      selection[i] = catalog.labels[i] ? weights[catalog.labels[i]] : 0;
    selection = maxFilter3(selection, w, h);
 
-   return { diameters: diameters, weights: weights, selection: selection };
+   return { weights: weights, selection: selection };
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +533,9 @@ function convolve2D(arr, w, h, k) {
 }
 
 // Disk and Moffat are non-separable, O(w*h*radius^2) -- the slowest options
-// at large radii. Prefer Gaussian/Box/Photographic for big glow radii on
-// full-resolution frames; reserve these for smaller radii or Previews.
+// at large radii. Prefer Gaussian/Box/Multi-scale Gaussian for big glow
+// radii on full-resolution frames, or use the downsample-blur-upsample
+// path below (params.glow.downsample) for these two specifically.
 function diskBlur(arr, w, h, radius) {
    var r = FMath.max(1, FMath.round(radius));
    var size = 2 * r + 1;
@@ -469,9 +565,10 @@ function moffatBlur(arr, w, h, radius) {
    return convolve2D(arr, w, h, { kernel: kernel, radius: extent, size: size });
 }
 
-// The original's un-named default blur mode: a 65/35 mix of a tight and a
-// broad Gaussian, giving a softer "photographic" halo than a single Gaussian.
-function photographicBlur(arr, w, h, radius) {
+// The un-named default blur mode in v1.0.0, now explicitly labeled "Multi-
+// scale Gaussian" in v1.2.0's own UI: a 65/35 mix of a tight and a broad
+// Gaussian, giving a softer halo than a single Gaussian.
+function multiscaleGaussianBlur(arr, w, h, radius) {
    var tight = gaussianBlur(arr, w, h, radius * 0.65);
    var broad = gaussianBlur(arr, w, h, radius * 1.8);
    var out = new Float32Array(arr.length);
@@ -531,7 +628,8 @@ function upsampleBilinear(arr, sw, sh, w, h) {
 // indistinguishable from full-resolution blur while cutting the dominant
 // O(w*h*radius^2) cost of Disk/Moffat by roughly factor^2, and the
 // separable modes by roughly factor. factor<=1 (the default) is a plain
-// pass-through to blurMask() with no behaviour change at all.
+// pass-through to blurMask() with no behaviour change at all. Not part of
+// the original script -- see PERFORMANCE NOTES at the end of this file.
 function blurMaskScaled(mask, w, h, radius, mode, factor) {
    if (factor <= 1) return blurMask(mask, w, h, radius, mode);
    var ds = downsampleBox(mask, w, h, factor);
@@ -555,7 +653,7 @@ function blurMask(mask, w, h, radius, mode) {
       case "Disk":     return diskBlur(mask, w, h, radius);
       case "Triangle": return triangleBlur(mask, w, h, radius);
       case "Moffat":   return moffatBlur(mask, w, h, radius);
-      default:         return photographicBlur(mask, w, h, radius); // "Photographic"
+      default:         return multiscaleGaussianBlur(mask, w, h, radius); // "Multi-scale Gaussian"
    }
 }
 
@@ -563,34 +661,24 @@ function blurMask(mask, w, h, radius, mode) {
 // Glow
 // ---------------------------------------------------------------------------
 
-function selectStars(lum, w, h, thresholdSigma, minDiameter, feather) {
-   var thr = robustThreshold(lum, thresholdSigma);
-   var n = w * h;
-   var mask = new Uint8Array(n);
-   for (var i = 0; i < n; ++i) mask[i] = lum[i] > thr.threshold ? 1 : 0;
-   mask = cleanupMask(mask, w, h);
-
-   var lbl = labelComponents(mask, w, h);
-   if (lbl.count === 0)
-      return { intensity: new Float32Array(n), selection: new Float32Array(n), bg: thr.bg };
-
-   var sel = diameterSelection(lbl.labels, lbl.count, w, h, minDiameter, feather);
+function selectStars(catalog, minDiameter, feather) {
+   var w = catalog.width, h = catalog.height, n = w * h;
+   var sel = componentSelection(catalog, minDiameter, feather);
 
    var intensity = new Float32Array(n);
-   var invRange = 1 / FMath.max(1 - thr.bg, 1e-6);
+   var invRange = 1 / FMath.max(1 - catalog.background, 1e-6);
    for (var i = 0; i < n; ++i) {
-      var inten = clamp((lum[i] - thr.bg) * invRange, 0, 1);
+      var inten = clamp((catalog.lum[i] - catalog.background) * invRange, 0, 1);
       intensity[i] = inten * sel.selection[i];
    }
-   return { intensity: intensity, selection: sel.selection, bg: thr.bg };
+   return { intensity: intensity, selection: sel.selection };
 }
 
 // Mutates `img` in place (screen-blends the glow onto it). Returns the
 // per-pixel selection weight (used only for optional diagnostics).
-function applyGlow(img, params, thresholdSigma, exclusionMask) {
+function applyGlow(img, catalog, params, exclusionMask) {
    var w = img.width, h = img.height, n = w * h;
-   var lum = luminance(img);
-   var sel = selectStars(lum, w, h, thresholdSigma, params.minDiameter, params.feather);
+   var sel = selectStars(catalog, params.minDiameter, params.feather);
    var starMask = sel.intensity, selectionWeight = sel.selection;
 
    if (exclusionMask) {
@@ -613,8 +701,7 @@ function applyGlow(img, params, thresholdSigma, exclusionMask) {
 
    // Colour layer: blur the star-masked colour per channel, renormalize the
    // three channels to sum to 3 (preserves relative hue while decoupling
-   // brightness from glow_alpha), then scale by glow_alpha. Matches the
-   // original's colour handling exactly now that per-pixel access is cheap.
+   // brightness from glow_alpha), then scale by glow_alpha.
    var glowChannels = [];
    if (img.channels === 1) {
       glowChannels.push(glowAlpha);
@@ -653,31 +740,8 @@ function applyGlow(img, params, thresholdSigma, exclusionMask) {
 }
 
 // ---------------------------------------------------------------------------
-// Diffraction spikes
+// Diffraction spikes -- star detection (core-ball refinement)
 // ---------------------------------------------------------------------------
-
-// Per-label bounding box (min/max x/y), computed once and reused for every
-// star's local core-ball refinement and colour sampling below -- this is
-// what keeps per-star work proportional to that star's own footprint
-// instead of a full image scan per star.
-function computeLabelBounds(labels, count, w, h) {
-   var minX = new Int32Array(count + 1).fill(w);
-   var maxX = new Int32Array(count + 1).fill(-1);
-   var minY = new Int32Array(count + 1).fill(h);
-   var maxY = new Int32Array(count + 1).fill(-1);
-   for (var y = 0; y < h; ++y) {
-      var row = y * w;
-      for (var x = 0; x < w; ++x) {
-         var l = labels[row + x];
-         if (!l) continue;
-         if (x < minX[l]) minX[l] = x;
-         if (x > maxX[l]) maxX[l] = x;
-         if (y < minY[l]) minY[l] = y;
-         if (y > maxY[l]) maxY[l] = y;
-      }
-   }
-   return { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
-}
 
 // 3x3 full-block dilation/erosion (local masks only) -- the pair used for
 // binary_closing(structure=ones((3,3))) in the original.
@@ -755,16 +819,17 @@ function fillHoles(mask, w, h) {
    return out;
 }
 
-// Refines one star's raw sigmoid-thresholded core into a solid, single-
-// island blob via local closing + hole-filling + largest-island selection,
-// then returns its centroid -- the direct equivalent of the original's
-// binary_closing()/binary_fill_holes()/largest-component cleanup. Restored
-// after real-world testing showed the earlier simplified version (plain
-// centroid over every sigmoid-thresholded pixel in the component, no
-// cleanup) let a stray noise blob or bleed elsewhere in the same connected
-// component pull some stars' spike origins visibly off-centre. Scoped to
-// the star's own bounding box (+ a small margin) rather than the full
-// image, so it's cheap regardless of image size.
+// Refines one star's raw thresholded core into a solid, single-island blob
+// via local closing + hole-filling + largest-island selection, then returns
+// its centroid. Scoped to the star's own bounding box (+ a small margin)
+// rather than the full image, matching v1.2.0's own use of a padded
+// component bounding box for the same purpose.
+//
+// The core threshold is `normalized >= 0.65` directly, not a sigmoid
+// comparison -- v1.2.0 notes sigmoid(normalized, midpoint=0.65) >= 0.5 is
+// mathematically equivalent to normalized >= 0.65 (sigmoid(0) == 0.5, and
+// it's monotonic), so the exp() call in an earlier draft of this port was
+// pure overhead; dropped to match.
 function refineCoreBall(labels, lum, l, w, h, bounds, background, denom) {
    var pad = 2;
    var x0 = FMath.max(0, bounds.minX[l] - pad);
@@ -784,8 +849,7 @@ function refineCoreBall(labels, lum, l, w, h, bounds, background, denom) {
          var li = lrow + lx;
          component[li] = 1;
          var normd = clamp((lum[gi] - background) / denom, 0, 1);
-         var contrasted = 1 / (1 + FMath.exp(-20 * (normd - 0.65)));
-         if (contrasted >= 0.5) core[li] = 1;
+         if (normd >= 0.65) core[li] = 1;
       }
    }
 
@@ -818,7 +882,7 @@ function refineCoreBall(labels, lum, l, w, h, bounds, background, denom) {
 }
 
 // Detects one point emitter per selected star: position, brightness, colour,
-// diameter and selection weight. Mirrors detect_star_emitters() closely.
+// diameter and selection weight. Uses the shared catalog (no re-detection).
 //
 // Note: PixInsight 1.9.4's V8 runtime also exposes a native StarDetector
 // class (new StarDetector; D.stars(image) -> array of StarData objects),
@@ -826,47 +890,32 @@ function refineCoreBall(labels, lum, l, w, h, bounds, background, denom) {
 // It's confirmed real and documented, and would be both faster and more
 // robust than this hand-rolled threshold+flood-fill approach. It wasn't
 // swapped in here because it selects/weights stars differently (no direct
-// equivalent of the original script's diameter-smoothstep feather), so
-// using it changes the tool's behaviour, not just its performance -- worth
-// trying if you want closer-to-native detection quality over strict
-// fidelity to the original Python algorithm.
-function detectStarEmitters(img, thresholdSigma, minDiameter, feather) {
-   var w = img.width, h = img.height, n = w * h;
-   var lum = luminance(img);
-   var thr = robustThreshold(lum, thresholdSigma);
+// equivalent of the diameter-smoothstep feather), so using it changes the
+// tool's behaviour, not just its performance.
+function detectStarEmitters(img, catalog, minDiameter, feather) {
+   var w = catalog.width, h = catalog.height;
+   if (catalog.count === 0) return { emitters: [], selection: new Float32Array(w * h) };
 
-   var mask = new Uint8Array(n);
-   for (var i = 0; i < n; ++i) mask[i] = lum[i] > thr.threshold ? 1 : 0;
-   mask = cleanupMask(mask, w, h);
-
-   var lbl = labelComponents(mask, w, h);
-   if (lbl.count === 0) return { emitters: [], selection: new Float32Array(n) };
-   var labels = lbl.labels, count = lbl.count;
-
-   var sel = diameterSelection(labels, count, w, h, minDiameter, feather);
-   var bounds = computeLabelBounds(labels, count, w, h);
-
-   var peaks = new Float64Array(count + 1);
-   for (var i = 0; i < n; ++i)
-      if (labels[i] && lum[i] > peaks[labels[i]]) peaks[labels[i]] = lum[i];
+   var sel = componentSelection(catalog, minDiameter, feather);
+   var labels = catalog.labels, lum = catalog.lum, bounds = catalog.bounds;
+   var background = catalog.background;
 
    var emitters = [];
-   for (var l = 1; l <= count; ++l) {
+   for (var l = 1; l <= catalog.count; ++l) {
       if (sel.weights[l] <= 1e-4) continue;
-      var peak = peaks[l];
-      var denom = FMath.max(peak - thr.bg, 1e-6);
+      var peak = catalog.peaks[l];
+      var denom = FMath.max(peak - background, 1e-6);
 
-      var core = refineCoreBall(labels, lum, l, w, h, bounds, thr.bg, denom);
+      var core = refineCoreBall(labels, lum, l, w, h, bounds, background, denom);
       if (!core) continue;
       var cy = core.y, cx = core.x;
 
-      var brightness = clamp((peak - thr.bg) / FMath.max(1 - thr.bg, 1e-6), 0, 1) * sel.weights[l];
+      var brightness = clamp((peak - background) / FMath.max(1 - background, 1e-6), 0, 1) * sel.weights[l];
 
       // Colour sample: component pixels between 15% and 85% of (peak-bg)
-      // above background, luminance-weighted average, same band as the
-      // original -- scoped to the star's bounding box like refineCoreBall,
-      // instead of scanning the whole image per star.
-      var lowB = thr.bg + 0.15 * denom, highB = thr.bg + 0.85 * denom;
+      // above background, luminance-weighted average, scoped to the star's
+      // bounding box.
+      var lowB = background + 0.15 * denom, highB = background + 0.85 * denom;
       var x0 = bounds.minX[l], x1 = bounds.maxX[l], y0 = bounds.minY[l], y1 = bounds.maxY[l];
       var csum = [0, 0, 0], wsum = 0, sampleCount = 0;
       for (var gy = y0; gy <= y1; ++gy) {
@@ -875,7 +924,7 @@ function detectStarEmitters(img, thresholdSigma, minDiameter, feather) {
             var gi = row + gx;
             if (labels[gi] !== l) continue;
             if (lum[gi] >= lowB && lum[gi] <= highB) {
-               var wgt = FMath.max(lum[gi] - thr.bg, 1e-6);
+               var wgt = FMath.max(lum[gi] - background, 1e-6);
                for (var c = 0; c < FMath.min(3, img.channels); ++c) csum[c] += img.data[c][gi] * wgt;
                wsum += wgt; sampleCount++;
             }
@@ -888,7 +937,7 @@ function detectStarEmitters(img, thresholdSigma, minDiameter, feather) {
             for (var gx = x0; gx <= x1; ++gx) {
                var gi = row + gx;
                if (labels[gi] !== l) continue;
-               var wgt = FMath.max(lum[gi] - thr.bg, 1e-6);
+               var wgt = FMath.max(lum[gi] - background, 1e-6);
                for (var c = 0; c < FMath.min(3, img.channels); ++c) csum[c] += img.data[c][gi] * wgt;
                wsum += wgt;
             }
@@ -900,21 +949,72 @@ function detectStarEmitters(img, thresholdSigma, minDiameter, feather) {
       for (var c = 0; c < 3; ++c) colour[c] = clamp(colour[c] / colourPeak * brightness, 0, 1);
 
       emitters.push({ y: cy, x: cx, brightness: brightness, colour: colour,
-                       diameter: sel.diameters[l], selectionFactor: sel.weights[l] });
+                       diameter: catalog.diameters[l], selectionFactor: sel.weights[l] });
    }
    return { emitters: emitters, selection: sel.selection };
 }
 
-// Renders four crisp arms per emitter directly into pixel buffers, using
-// per-segment alpha (not accumulation) for falloff -- the direct equivalent
-// of the original's np.maximum.at() sampling.
-function drawSpikes(w, h, channels, emitters, length, width, angleDeg) {
+// ---------------------------------------------------------------------------
+// Diffraction spikes -- rendering
+// ---------------------------------------------------------------------------
+
+// Every pixel of an 8-connected Bresenham line from (x0,y0) to (x1,y1).
+// Replaces an earlier draft's parametric "step along by a fixed distance,
+// round to nearest pixel" sampling, which could leave gaps at some angles;
+// Bresenham guarantees a fully connected line at any angle or length.
+function connectedLinePixels(x0, y0, x1, y1) {
+   var xs = [], ys = [];
+   var dx = FMath.abs(x1 - x0);
+   var sx = x0 < x1 ? 1 : -1;
+   var dy = -FMath.abs(y1 - y0);
+   var sy = y0 < y1 ? 1 : -1;
+   var error = dx + dy;
+   while (true) {
+      xs.push(x0); ys.push(y0);
+      if (x0 === x1 && y0 === y1) break;
+      var doubledError = 2 * error;
+      if (doubledError >= dy) { error += dy; x0 += sx; }
+      if (doubledError <= dx) { error += dx; y0 += sy; }
+   }
+   return { x: xs, y: ys };
+}
+
+// theta (offset from the base angle), lengthScale, intensityScale, and
+// whether spectral tinting applies to that arm. "Newtonian" is the classic
+// 4-arm cross. "JWST" is six long mirror-segment spikes at 60-degree
+// intervals plus two shorter horizontal strut spikes.
+function buildArmSpecs(spikeType) {
+   if (spikeType === "JWST") {
+      var specs = [];
+      for (var arm = 0; arm < 6; ++arm)
+         specs.push({ theta: FMath.PI / 6.0 + arm * FMath.PI / 3.0, lengthScale: 1.0, intensityScale: 1.0, hasSpectrum: true });
+      specs.push({ theta: 0.0, lengthScale: 0.42, intensityScale: 0.45, hasSpectrum: false });
+      specs.push({ theta: FMath.PI, lengthScale: 0.42, intensityScale: 0.45, hasSpectrum: false });
+      return specs;
+   }
+   var specs4 = [];
+   for (var a = 0; a < 4; ++a)
+      specs4.push({ theta: a * FMath.PI / 2.0, lengthScale: 1.0, intensityScale: 1.0, hasSpectrum: true });
+   return specs4;
+}
+
+// Renders every emitter's arms into per-channel canvases via per-segment
+// max() compositing -- the direct equivalent of the original's
+// np.maximum.at(), now walking Bresenham line pixels instead of a fixed
+// parametric step. Handles both spike types and the optional spectral
+// (rainbow) diffraction tint.
+function drawSpikes(w, h, channels, emitters, length, width, angleDeg, spikeType,
+                     spectral, spectralStrength, spectralPosition, spectralSpread,
+                     spectralSaturation, spectralSmoothness, perArmVariation) {
    var n = w * h;
    var canvas = [];
    for (var c = 0; c < channels; ++c) canvas.push(new Float32Array(n));
 
    length = FMath.max(length, 2); width = FMath.max(width, 0);
    var baseAngle = angleDeg * FMath.PI / 180.0;
+   var armSpecs = buildArmSpecs(spikeType);
+   var hardness = 4.0 - 3.3 * spectralSmoothness;
+
    var largestDiameter = 1;
    for (var e = 0; e < emitters.length; ++e)
       largestDiameter = FMath.max(largestDiameter, emitters[e].diameter);
@@ -922,30 +1022,71 @@ function drawSpikes(w, h, channels, emitters, length, width, angleDeg) {
    for (var e = 0; e < emitters.length; ++e) {
       var em = emitters[e];
       var diameterRatio = clamp(em.diameter / FMath.max(largestDiameter, 1e-6), 0, 1);
-      var sizeFactor = 0.30 + 0.70 * FMath.pow(diameterRatio, 0.70);
+      var sizeFactor = FMath.max(0.08, FMath.pow(diameterRatio, 0.85));
       var featherLength = FMath.pow(clamp(em.selectionFactor, 0, 1), 0.35);
       var emitterLength = FMath.max(2, length * sizeFactor * featherLength);
-      var step = 0.75;
       var sourceColour = (channels === 1) ? [em.brightness] : em.colour;
+      var spectralStarFactor = FMath.pow(diameterRatio, 1.20) * FMath.pow(clamp(em.selectionFactor, 0, 1), 0.50);
 
-      for (var arm = 0; arm < 4; ++arm) {
-         var theta = baseAngle + arm * (FMath.PI / 2.0);
-         var dx = FMath.cos(theta), dy = FMath.sin(theta);
-         for (var dist = 0; dist <= emitterLength; dist += step) {
-            var falloff = FMath.exp(-dist / FMath.max(emitterLength * 0.48, 1e-6)) *
-                          FMath.pow(clamp(1 - dist / emitterLength, 0, 1), 0.35);
-            if (falloff <= 0) continue;
-            var xx = FMath.round(em.x + dx * dist), yy = FMath.round(em.y + dy * dist);
+      for (var a = 0; a < armSpecs.length; ++a) {
+         var spec = armSpecs[a];
+         var theta = baseAngle + spec.theta;
+         var armLength = FMath.max(2.0, emitterLength * spec.lengthScale);
+         var endX = FMath.round(em.x + FMath.cos(theta) * armLength);
+         var endY = FMath.round(em.y + FMath.sin(theta) * armLength);
+         var line = connectedLinePixels(FMath.round(em.x), FMath.round(em.y), endX, endY);
+
+         var doSpectral = spectral && spec.hasSpectrum && channels >= 3;
+         var variationWave = 0, localPosition = 0, localStrength = 0, sigma = 0.005;
+         if (doSpectral) {
+            variationWave = FMath.sin((a + 1) * 1.618 + em.x * 0.013 + em.y * 0.017);
+            localPosition = clamp(spectralPosition + variationWave * perArmVariation * 0.08, 0.05, 0.95);
+            localStrength = clamp(spectralStrength * (1.0 + variationWave * perArmVariation * 0.25), 0, 1);
+            sigma = FMath.max(spectralSpread * (0.22 + 0.78 * spectralSmoothness) * 0.5, 0.005);
+         }
+
+         for (var k = 0; k < line.x.length; ++k) {
+            var xx = line.x[k], yy = line.y[k];
             if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+            var dist = FMath.hypot(xx - em.x, yy - em.y);
+            var falloff = FMath.exp(-dist / FMath.max(armLength * 0.48, 1e-6)) *
+                          FMath.pow(clamp(1 - dist / FMath.max(armLength, 1e-6), 0, 1), 0.35);
+            falloff *= spec.intensityScale;
+            if (falloff <= 0) continue;
+
+            var spectralMix = 0, spectralRgb = null;
+            if (doSpectral) {
+               var position = clamp(dist / FMath.max(armLength, 1e-6), 0, 1);
+               spectralMix = localStrength * spectralStarFactor *
+                             FMath.exp(-0.5 * FMath.pow((position - localPosition) / sigma, 2));
+               var phase = clamp((position - (localPosition - spectralSpread * 0.5)) / FMath.max(spectralSpread, 1e-6), 0, 1);
+               // Blue near the core, red toward the outer spike (matches the
+               // original's channel order: R, G, B formulas in that order).
+               var formulaR = FMath.pow(clamp(3.0 * phase - 1.5, 0, 1), hardness);
+               var formulaG = FMath.pow(clamp(1.0 - 3.0 * FMath.abs(phase - 0.5), 0, 1), hardness);
+               var formulaB = FMath.pow(clamp(1.5 - 3.0 * phase, 0, 1), hardness);
+               spectralRgb = [
+                  (1 - spectralSaturation) + spectralSaturation * formulaR,
+                  (1 - spectralSaturation) + spectralSaturation * formulaG,
+                  (1 - spectralSaturation) + spectralSaturation * formulaB
+               ];
+            }
+
             var idx = yy * w + xx;
             for (var c = 0; c < channels; ++c) {
-               var v = falloff * sourceColour[c];
-               if (v > canvas[c][idx]) canvas[c][idx] = v; // maximum, not accumulation
+               var channelValue = sourceColour[c];
+               if (spectralRgb && c < 3) {
+                  var spectralValue = em.brightness * (0.20 + 0.80 * spectralRgb[c]);
+                  channelValue = channelValue * (1 - spectralMix) + spectralValue * spectralMix;
+               }
+               var v = falloff * channelValue;
+               if (v > canvas[c][idx]) canvas[c][idx] = v;
             }
          }
       }
    }
 
+   // Width is a fixed optical line width, independent of star size.
    if (width > 0.05) {
       for (var c = 0; c < channels; ++c) {
          var origPeak = 0;
@@ -965,12 +1106,11 @@ function drawSpikes(w, h, channels, emitters, length, width, angleDeg) {
    return canvas;
 }
 
-// Detects emitters on `sourceImg` (the pristine pre-glow image, matching
-// the original's source_rgb) and screen-blends spikes onto `compositeImg`
-// (post-glow) in place, matching the original's composite_rgb target.
-function applySpikes(sourceImg, compositeImg, params, thresholdSigma, exclusionMask) {
-   var w = sourceImg.width, h = sourceImg.height, n = w * h;
-   var det = detectStarEmitters(sourceImg, thresholdSigma, params.minDiameter, params.feather);
+// Detects emitters on `sourceImg` (the pristine pre-glow image) and screen-
+// blends primary spikes onto `compositeImg` (post-glow) in place.
+function applySpikes(sourceImg, compositeImg, catalog, params, exclusionMask) {
+   var w = catalog.width, h = catalog.height, n = w * h;
+   var det = detectStarEmitters(sourceImg, catalog, params.minDiameter, params.feather);
    var emitters = det.emitters, selection = det.selection;
 
    if (exclusionMask) {
@@ -983,7 +1123,10 @@ function applySpikes(sourceImg, compositeImg, params, thresholdSigma, exclusionM
    if (emitters.length === 0) return selection;
 
    var preComposite = cloneChannels(compositeImg);
-   var spikeRGB = drawSpikes(w, h, sourceImg.channels, emitters, params.length, params.width, params.angle);
+   var spikeRGB = drawSpikes(w, h, sourceImg.channels, emitters, params.length, params.width, params.angle,
+                              params.spikeType, params.spectral, params.spectralStrength, params.spectralPosition,
+                              params.spectralSpread, params.spectralSaturation, params.spectralSmoothness,
+                              params.perArmVariation);
    for (var c = 0; c < sourceImg.channels; ++c)
       for (var i = 0; i < n; ++i) spikeRGB[c][i] = clamp(spikeRGB[c][i] * params.strength, 0, 1);
 
@@ -996,8 +1139,9 @@ function applySpikes(sourceImg, compositeImg, params, thresholdSigma, exclusionM
       }
    }
 
-   // Protect the exact centre pixel of each emitter (four arms still run
-   // underneath and visibly meet the core without a large artificial gap).
+   // Protect the exact centre pixel of each emitter (four-plus arms still
+   // run underneath and visibly meet the core without a large artificial
+   // gap).
    for (var e = 0; e < emitters.length; ++e) {
       var em = emitters[e];
       var xx = clamp(FMath.round(em.x), 0, w - 1), yy = clamp(FMath.round(em.y), 0, h - 1);
@@ -1016,6 +1160,62 @@ function applySpikes(sourceImg, compositeImg, params, thresholdSigma, exclusionM
       }
    }
    return selection;
+}
+
+// A second, softer 4-arm spike layer offset +45 degrees from the primary.
+// Always classic Newtonian, never spectral, regardless of the primary
+// spike's own spikeType/spectral settings -- matches v1.2.0's
+// make_secondary_spikes(), which calls draw_point_emitter_spikes() without
+// passing spike_type/spectral at all (falling through to their defaults).
+// Detects its own emitters (own min_diameter/feather), but borrows the
+// primary spike's angle and blend rather than having its own -- matching
+// v1.2.0's secondary_spike_parameters(), which reads
+// self.spike_angle_spin/self.spike_blend_spin directly.
+function applySecondarySpikes(sourceImg, compositeImg, catalog, secondaryParams, angle, blend, exclusionMask) {
+   var w = catalog.width, h = catalog.height, n = w * h;
+   var det = detectStarEmitters(sourceImg, catalog, secondaryParams.minDiameter, secondaryParams.feather);
+   var emitters = det.emitters;
+
+   if (exclusionMask) {
+      emitters = emitters.filter(function(e) {
+         var xx = clamp(FMath.round(e.x), 0, w - 1), yy = clamp(FMath.round(e.y), 0, h - 1);
+         return (1 - clamp(exclusionMask[yy * w + xx], 0, 1)) > 0.5;
+      });
+   }
+   if (emitters.length === 0) return;
+
+   var preComposite = cloneChannels(compositeImg);
+   var spikeRGB = drawSpikes(w, h, sourceImg.channels, emitters, secondaryParams.length, secondaryParams.width,
+                              angle + 45.0, "Newtonian", false, 0, 0, 0, 0, 0, 0);
+   for (var c = 0; c < sourceImg.channels; ++c)
+      for (var i = 0; i < n; ++i) spikeRGB[c][i] = clamp(spikeRGB[c][i] * secondaryParams.strength, 0, 1);
+
+   var blendAmt = clamp(blend, 0.01, 1.0);
+   for (var c = 0; c < compositeImg.channels; ++c) {
+      var base = preComposite.data[c], spike = spikeRGB[c], out = compositeImg.data[c];
+      for (var i = 0; i < n; ++i) {
+         var scr = 1 - (1 - base[i]) * (1 - spike[i]);
+         out[i] = clamp(base[i] + (scr - base[i]) * blendAmt, 0, 1);
+      }
+   }
+
+   for (var e = 0; e < emitters.length; ++e) {
+      var em = emitters[e];
+      var xx = clamp(FMath.round(em.x), 0, w - 1), yy = clamp(FMath.round(em.y), 0, h - 1);
+      var idx = yy * w + xx;
+      for (var c = 0; c < compositeImg.channels; ++c)
+         compositeImg.data[c][idx] = preComposite.data[c][idx];
+   }
+
+   if (exclusionMask) {
+      for (var c = 0; c < compositeImg.channels; ++c) {
+         var out = compositeImg.data[c], pre = preComposite.data[c];
+         for (var i = 0; i < n; ++i) {
+            var ex = clamp(exclusionMask[i], 0, 1);
+            out[i] = out[i] * (1 - ex) + pre[i] * ex;
+         }
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,8 +1245,8 @@ class AsterDialog extends Dialog {
    this.info.wordWrapping = true;
    this.info.useRichText = true;
    this.info.text = "<p>Runs on the active image or the active Preview. Optionally pick a " +
-      "mono image below as an exclusion mask (1 = fully protected, matching the original's " +
-      "lasso) &mdash; it must match the target's pixel dimensions.</p>";
+      "mono image below as an exclusion mask (1 = fully protected) &mdash; it must match the " +
+      "target's pixel dimensions. Detection, glow and spikes all share one star catalog.</p>";
 
    this.maskLabel = new Label(this);
    this.maskLabel.text = "Exclusion mask:";
@@ -1061,7 +1261,7 @@ class AsterDialog extends Dialog {
    function slider(label, min, max, obj, prop, decimals) {
       var c = new NumericControl(dlg);
       c.label.text = label;
-      c.label.minWidth = 150;
+      c.label.minWidth = 160;
       c.setRange(min, max);
       c.slider.setRange(0, 500);
       c.setPrecision(decimals === undefined ? 2 : decimals);
@@ -1070,7 +1270,18 @@ class AsterDialog extends Dialog {
       return c;
    }
 
-   this.thresholdCtl = slider("Threshold (\u03C3)", 0.5, 10, p, "thresholdSigma", 2);
+   this.blackCtl = slider("Detection black point", 0.0, 0.99, p, "detectionBlack", 2);
+   this.whiteCtl = slider("Detection white point", 0.01, 1.0, p, "detectionWhite", 2);
+
+   this.maskGlowCheck = new CheckBox(this);
+   this.maskGlowCheck.text = "Apply exclusion mask to glow";
+   this.maskGlowCheck.checked = p.maskGlow;
+   this.maskGlowCheck.onCheck = function(checked) { p.maskGlow = checked; };
+
+   this.maskSpikesCheck = new CheckBox(this);
+   this.maskSpikesCheck.text = "Apply exclusion mask to spikes";
+   this.maskSpikesCheck.checked = p.maskSpikes;
+   this.maskSpikesCheck.onCheck = function(checked) { p.maskSpikes = checked; };
 
    this.glowCheck = new CheckBox(this);
    this.glowCheck.text = "Glow";
@@ -1080,9 +1291,9 @@ class AsterDialog extends Dialog {
    this.blurLabel = new Label(this);
    this.blurLabel.text = "Blur mode:";
    this.blurCombo = new ComboBox(this);
-   var blurModes = ["Gaussian", "Box", "Disk", "Triangle", "Moffat", "Photographic"];
+   var blurModes = ["Gaussian", "Multi-scale Gaussian", "Moffat", "Triangle", "Box", "Disk"];
    for (var i = 0; i < blurModes.length; ++i) this.blurCombo.addItem(blurModes[i]);
-   this.blurCombo.currentItem = blurModes.indexOf(p.glow.blurMode);
+   this.blurCombo.currentItem = FMath.max(0, blurModes.indexOf(p.glow.blurMode));
    this.blurCombo.onItemSelected = function(index) { p.glow.blurMode = blurModes[index]; };
 
    this.downsampleLabel = new Label(this);
@@ -1105,10 +1316,10 @@ class AsterDialog extends Dialog {
    blurRow.add(this.downsampleCombo);
    blurRow.addStretch();
 
-   this.diameterCtl = slider("Min. star diameter (px)", 1, 150, p.glow, "minDiameter", 1);
-   this.featherCtl  = slider("Diameter feather (px)", 0.1, 100, p.glow, "feather", 1);
-   this.radiusCtl   = slider("Glow radius (px)", 0.5, 60, p.glow, "radius", 2);
-   this.gammaCtl    = slider("Glow gamma", 0.05, 3, p.glow, "gamma", 2);
+   this.diameterCtl = slider("Min. star diameter (px)", 1, 300, p.glow, "minDiameter", 0);
+   this.featherCtl  = slider("Cutoff feather (px)", 0.5, 40, p.glow, "feather", 1);
+   this.radiusCtl   = slider("Glow radius (px)", 0.5, 100, p.glow, "radius", 1);
+   this.gammaCtl    = slider("Glow gamma", 0.10, 3, p.glow, "gamma", 2);
    this.strengthCtl = slider("Glow strength", 0, 2, p.glow, "strength", 2);
    this.blendCtl    = slider("Glow blend", 0.01, 1, p.glow, "blend", 2);
 
@@ -1117,13 +1328,45 @@ class AsterDialog extends Dialog {
    this.spikesCheck.checked = p.spikesEnabled;
    this.spikesCheck.onCheck = function(checked) { p.spikesEnabled = checked; };
 
-   this.spikeDiameterCtl = slider("Spike min. diameter (px)", 1, 200, p.spike, "minDiameter", 1);
-   this.spikeFeatherCtl  = slider("Spike feather (px)", 0.1, 100, p.spike, "feather", 1);
-   this.spikeLengthCtl   = slider("Spike length (px)", 5, 1500, p.spike, "length", 0);
+   this.spikeTypeLabel = new Label(this);
+   this.spikeTypeLabel.text = "Spike type:";
+   this.spikeTypeCombo = new ComboBox(this);
+   var spikeTypes = ["Newtonian", "JWST"];
+   for (var i = 0; i < spikeTypes.length; ++i) this.spikeTypeCombo.addItem(spikeTypes[i]);
+   this.spikeTypeCombo.currentItem = FMath.max(0, spikeTypes.indexOf(p.spike.spikeType));
+   this.spikeTypeCombo.onItemSelected = function(index) { p.spike.spikeType = spikeTypes[index]; };
+   var spikeTypeRow = new HorizontalSizer;
+   spikeTypeRow.spacing = 6;
+   spikeTypeRow.add(this.spikeTypeLabel);
+   spikeTypeRow.add(this.spikeTypeCombo);
+   spikeTypeRow.addStretch();
+
+   this.spikeDiameterCtl = slider("Spike min. diameter (px)", 1, 300, p.spike, "minDiameter", 0);
+   this.spikeFeatherCtl  = slider("Spike cutoff feather (px)", 0.5, 40, p.spike, "feather", 1);
+   this.spikeLengthCtl   = slider("Spike length (px)", 2, 600, p.spike, "length", 0);
    this.spikeWidthCtl    = slider("Spike softening (px)", 0, 10, p.spike, "width", 2);
-   this.spikeAngleCtl    = slider("Spike angle (\u00B0)", 0, 90, p.spike, "angle", 1);
+   this.spikeAngleCtl    = slider("Spike angle (\u00B0)", 0, 45, p.spike, "angle", 1);
    this.spikeStrengthCtl = slider("Spike strength", 0, 2, p.spike, "strength", 2);
    this.spikeBlendCtl    = slider("Spike blend", 0.01, 1, p.spike, "blend", 2);
+
+   this.spectralCheck = new CheckBox(this);
+   this.spectralCheck.text = "Enable spectral diffraction";
+   this.spectralCheck.checked = p.spike.spectral;
+   this.spectralCheck.onCheck = function(checked) { p.spike.spectral = checked; };
+
+   this.spectralStrengthCtl = slider("Spectral strength", 0, 1, p.spike, "spectralStrength", 2);
+   this.spectralSaturationCtl = slider("Spectrum saturation", 0, 1, p.spike, "spectralSaturation", 2);
+
+   this.secondaryCheck = new CheckBox(this);
+   this.secondaryCheck.text = "Enable secondary soft spikes (+45\u00B0)";
+   this.secondaryCheck.checked = p.secondaryEnabled;
+   this.secondaryCheck.onCheck = function(checked) { p.secondaryEnabled = checked; };
+
+   this.secondaryDiameterCtl = slider("Secondary min. diameter (px)", 1, 300, p.secondary, "minDiameter", 0);
+   this.secondaryFeatherCtl  = slider("Secondary cutoff feather (px)", 0.5, 80, p.secondary, "feather", 1);
+   this.secondaryStrengthCtl = slider("Secondary strength", 0, 2, p.secondary, "strength", 2);
+   this.secondaryLengthCtl   = slider("Secondary length (px)", 2, 400, p.secondary, "length", 0);
+   this.secondaryWidthCtl    = slider("Secondary width (px)", 0, 20, p.secondary, "width", 2);
 
    this.okButton = new PushButton(this);
    this.okButton.text = "Apply";
@@ -1142,7 +1385,10 @@ class AsterDialog extends Dialog {
    this.sizer.spacing = 6;
    this.sizer.add(this.info);
    this.sizer.add(maskRow);
-   this.sizer.add(this.thresholdCtl);
+   this.sizer.add(this.blackCtl);
+   this.sizer.add(this.whiteCtl);
+   this.sizer.add(this.maskGlowCheck);
+   this.sizer.add(this.maskSpikesCheck);
    this.sizer.addSpacing(6);
    this.sizer.add(this.glowCheck);
    this.sizer.add(blurRow);
@@ -1154,6 +1400,7 @@ class AsterDialog extends Dialog {
    this.sizer.add(this.blendCtl);
    this.sizer.addSpacing(8);
    this.sizer.add(this.spikesCheck);
+   this.sizer.add(spikeTypeRow);
    this.sizer.add(this.spikeDiameterCtl);
    this.sizer.add(this.spikeFeatherCtl);
    this.sizer.add(this.spikeLengthCtl);
@@ -1161,6 +1408,17 @@ class AsterDialog extends Dialog {
    this.sizer.add(this.spikeAngleCtl);
    this.sizer.add(this.spikeStrengthCtl);
    this.sizer.add(this.spikeBlendCtl);
+   this.sizer.addSpacing(6);
+   this.sizer.add(this.spectralCheck);
+   this.sizer.add(this.spectralStrengthCtl);
+   this.sizer.add(this.spectralSaturationCtl);
+   this.sizer.addSpacing(6);
+   this.sizer.add(this.secondaryCheck);
+   this.sizer.add(this.secondaryDiameterCtl);
+   this.sizer.add(this.secondaryFeatherCtl);
+   this.sizer.add(this.secondaryStrengthCtl);
+   this.sizer.add(this.secondaryLengthCtl);
+   this.sizer.add(this.secondaryWidthCtl);
    this.sizer.addSpacing(8);
    this.sizer.add(buttons);
    } // constructor
@@ -1203,15 +1461,24 @@ function main() {
 
    view.beginProcess(UndoFlag.PixelData);
    try {
+      console.writeln("Aster: detecting stars...");
+      var catalog = buildStarCatalog(img, p.detectionBlack, p.detectionWhite);
+
       var original = p.spikesEnabled ? cloneChannels(img) : null;
 
       if (p.glowEnabled) {
          console.writeln("Aster: computing glow (" + p.glow.blurMode + ")...");
-         applyGlow(img, p.glow, p.thresholdSigma, exclusionMask);
+         applyGlow(img, catalog, p.glow, p.maskGlow ? exclusionMask : null);
       }
       if (p.spikesEnabled) {
-         console.writeln("Aster: computing diffraction spikes...");
-         applySpikes(original, img, p.spike, p.thresholdSigma, exclusionMask);
+         console.writeln("Aster: computing " + p.spike.spikeType + " spikes...");
+         applySpikes(original, img, catalog, p.spike, p.maskSpikes ? exclusionMask : null);
+
+         if (p.secondaryEnabled && p.spike.spikeType === "Newtonian") {
+            console.writeln("Aster: computing secondary spikes...");
+            applySecondarySpikes(original, img, catalog, p.secondary, p.spike.angle, p.spike.blend,
+                                  p.maskSpikes ? exclusionMask : null);
+         }
       }
 
       console.writeln("Aster: writing pixel data...");
@@ -1228,7 +1495,119 @@ function main() {
 main();
 
 /* ---------------------------------------------------------------------------
- * What changed vs. the Siril script, and why
+ * v1.2.0 sync -- what changed from the v1.0.0-based port, and why
+ * ---------------------------------------------------------------------------
+ *
+ * ARCHITECTURE -- shared star catalog.
+ *   v1.0.0 ran an independent detect-then-label pass for glow and for
+ *   spikes. v1.2.0 introduced build_star_catalog(): one shared detection
+ *   pass (background, connected components, per-component diameter/peak/
+ *   bounds), reused by glow, primary spikes and secondary spikes via
+ *   component_selection(). Ported as buildStarCatalog() + componentSelection(),
+ *   called once in main() and threaded through every stage below.
+ *   v1.2.0 also added an in-memory cache keyed on image identity and a
+ *   two-stage floor/reweight detection scheme, purely to keep its live
+ *   preview responsive while dragging sliders. That's a GUI-interactivity
+ *   optimization with no effect on the final numeric output of a single
+ *   deterministic run, so it isn't replicated here -- this script always
+ *   computes catalog + selection directly at the real parameter values,
+ *   which is mathematically equivalent for a one-shot batch script.
+ *
+ * ALGORITHM CHANGE -- detection threshold.
+ *   v1.0.0 auto-thresholded via background + 3.5*sigma (median/MAD), with a
+ *   percentile floor. v1.2.0 replaced this entirely with two user-set
+ *   levels: detection black/white points define a linear remap of
+ *   luminance, thresholded at a fixed 0.05. This is a deliberate behaviour
+ *   change by the original author, not a bug fix -- ported as-is
+ *   (buildStarCatalog()'s detectionBlack/detectionWhite parameters).
+ *   v1.2.0 also dropped v1.0.0's extra post-opening dilation pass ("No
+ *   dilation is used, so nearby halos are not joined") -- ported as-is;
+ *   cleanupMask() is now a plain 2x2-structuring-element opening
+ *   (erode2x2+dilate2x2 with the same kernel for both steps), matching
+ *   ndi.binary_opening(structure=ones((2,2))) exactly, rather than the
+ *   erode(2x2)+dilate(cross) approximation an earlier draft of this port
+ *   used to stand in for v1.0.0's extra dilation step.
+ *
+ * NEW FEATURE -- JWST spike pattern.
+ *   spikeType "JWST": six long arms at 60-degree intervals plus two short,
+ *   dimmer horizontal strut spikes (0.42x length, 0.45x intensity). Ported
+ *   via buildArmSpecs(); drawSpikes() is now driven by a per-arm spec list
+ *   (angle offset, length scale, intensity scale, spectral eligibility)
+ *   instead of a hardcoded 4-arm loop.
+ *
+ * NEW FEATURE -- spectral (rainbow) diffraction tinting.
+ *   An optional per-arm chromatic gradient (blue near the core fading to
+ *   red toward the tip), strength/position/spread/saturation/smoothness-
+ *   controlled, with a small per-arm/per-star sinusoidal variation so
+ *   repeated stars and arms don't look identical. Only the strength and
+ *   saturation controls are exposed in the dialog, matching v1.2.0's own
+ *   UI -- position/spread/smoothness/per-arm-variation are fixed at the
+ *   values v1.2.0 itself hardcodes ("the more natural checkbox-only look
+ *   from the first spectral prototype"). JWST's two strut arms never carry
+ *   spectral tint (hasSpectrum: false in their arm spec), matching the
+ *   original.
+ *
+ * NEW FEATURE -- secondary spikes.
+ *   A second, independently-parameterized 4-arm layer offset +45 degrees
+ *   from the primary, always classic Newtonian (never JWST, never
+ *   spectral) regardless of the primary spike's own settings. Only applies
+ *   when spikesEnabled, secondaryEnabled, and the primary spikeType is
+ *   "Newtonian" (a JWST pattern plus a +45-degree 4-arm layer isn't a
+ *   combination the original exposes). Ported as applySecondarySpikes(),
+ *   detecting its own emitters via the shared catalog but reusing the
+ *   primary spike's angle and blend rather than having its own, matching
+ *   v1.2.0's secondary_spike_parameters().
+ *
+ * NEW FEATURE -- independent exclusion-mask gating.
+ *   v1.0.0 applied one exclusion mask uniformly to glow and spikes.
+ *   v1.2.0 added separate toggles (mask_glow_checkbox / mask_spikes_checkbox,
+ *   both default on) so an area can be protected from one effect but not
+ *   the other. Ported as params.maskGlow/params.maskSpikes, gating which
+ *   calls receive the exclusion mask at all in main().
+ *
+ * FORMULA CHANGE -- spike length scaling by star size.
+ *   v1.0.0: size_factor = 0.30 + 0.70 * diameter_ratio^0.70. v1.2.0:
+ *   size_factor = max(0.08, diameter_ratio^0.85) -- a different curve
+ *   shape and a lower floor for the smallest selected stars. Ported as-is.
+ *
+ * MICRO-OPTIMIZATION -- core-ball threshold.
+ *   An earlier draft of this port computed a contrast-boosted sigmoid and
+ *   compared it to 0.5 per pixel. v1.2.0 points out sigmoid(normalized,
+ *   midpoint=0.65) >= 0.5 is mathematically identical to normalized >= 0.65
+ *   (the sigmoid crosses 0.5 exactly at its midpoint and is monotonic), so
+ *   the exp() call was pure overhead. Dropped to match, in refineCoreBall().
+ *
+ * RENDERING CHANGE -- Bresenham spike lines.
+ *   An earlier draft of this port stepped along each spike arm at a fixed
+ *   distance interval and rounded each sample to the nearest pixel, which
+ *   could leave small gaps near certain angles. v1.2.0 introduced
+ *   connected_line_pixels(), an 8-connected Bresenham line walk that
+ *   guarantees a fully connected line at any angle or length. Ported as
+ *   connectedLinePixels(), now driving drawSpikes()'s per-arm pixel walk.
+ *
+ * RELABELED, NOT CHANGED -- default blur mode.
+ *   v1.0.0's un-named two-Gaussian fallback blur mode is explicitly labeled
+ *   "Multi-scale Gaussian" in v1.2.0's own UI. Renamed
+ *   photographicBlur()->multiscaleGaussianBlur() and updated the dialog's
+ *   blur-mode combo text/order to match; the math is unchanged.
+ *
+ * NOT PORTED -- orientation flip (apply_orientation()).
+ *   v1.2.0 added a self-inverse flip/rotate step applied on load and
+ *   un-applied before writing back to Siril, to compensate for a Siril<->
+ *   NumPy vertical-axis display convention mismatch. PixInsight's
+ *   ImageIterator reads/writes the image's own pixel buffer directly with
+ *   no separate display step, so there's no equivalent mismatch to
+ *   compensate for -- not applicable here.
+ *
+ * NOT PORTED -- live preview, lasso exclusion painting, detection-mask
+ * overlay, before/after hold-spacebar toggle.
+ *   All Qt-specific interactive GUI features with no PJSR equivalent worth
+ *   reimplementing; see the DROPPED note further down for how PixInsight's
+ *   own Preview and mask features substitute for the first two.
+ * ------------------------------------------------------------------------ */
+
+/* ---------------------------------------------------------------------------
+ * What else changed vs. the Siril script (carried over from earlier ports)
  * ---------------------------------------------------------------------------
  *
  * KEPT FAITHFUL, now that direct pixel access is fast under V8:
@@ -1237,22 +1616,18 @@ main();
  *   - The exact diameter smoothstep star selection (t*t*(3-2*t) feather),
  *     not a hard cutoff.
  *   - All five blur kernels (Gaussian/Box/Disk/Triangle/Moffat) plus the
- *     default two-Gaussian "Photographic" mix.
+ *     default two-Gaussian "Multi-scale Gaussian" mix.
  *   - The true locally-weighted colour halo (renormalize-to-3 trick), not
  *     an approximation via image division.
  *   - Spike falloff via per-segment max() sampling, matching
  *     np.maximum.at() exactly rather than an alpha-over approximation.
  *   - Full spike core-ball cleanup (closing + fill-holes + largest-island
  *     selection, via refineCoreBall()), scoped to each star's own bounding
- *     box for speed. An earlier draft dropped this and centroided every
- *     sigmoid-thresholded pixel directly, which let stray noise elsewhere
- *     in the same connected component pull some stars' spike origins
- *     visibly off-centre.
+ *     box for speed.
  *   - Support for both float and integer PixInsight images (via
  *     ImageIterator.toReal()/toSample()), matching the original's
  *     normalize_image()/denormalize_image() handling of Siril's 16-bit
- *     integer vs. float working range -- dropped in earlier drafts of this
- *     port that assumed float-only input.
+ *     integer vs. float working range.
  *
  * DROPPED -- live-drag preview with a lasso exclusion mask.
  *   Rebuilding a real-time bitmap-drag preview pane is a large chunk of
@@ -1261,6 +1636,11 @@ main();
  *   patch to iterate quickly (this script honours window.currentView), and
  *   pick any open mono image as an exclusion mask via the ViewList control
  *   -- paint it with PixInsight's own mask tools first.
+ *
+ * SIMPLIFIED -- spike core-ball extraction edge case.
+ *   The largest-island selection in refineCoreBall() is a plain area-max
+ *   over local flood-fill labels, not scipy's np.argmax(bincount) -- same
+ *   result, different implementation.
  *
  * NOT PORTED -- push-to-Siril plumbing.
  *   Not applicable; beginProcess()/endProcess() gives full native Undo,
@@ -1272,12 +1652,11 @@ main();
  *     drop-in for Math, confirmed in PixInsight's own V8 porting guide to
  *     run up to an order of magnitude faster on heavy calculation loops --
  *     exactly what the blur kernels and spike falloff are).
- *   - median()/percentile()/medianAbsDeviation() run on a deterministic
- *     stride subsample (capped at 400,000 samples) via subsample(), not the
- *     full-resolution luminance array -- these feed a single background/
- *     noise threshold, not a per-pixel decision, so the subsample is
- *     statistically equivalent in practice and sorting cost stops scaling
- *     with image size.
+ *   - background (catalog.background) runs on a deterministic stride
+ *     subsample (capped at 400,000 samples) via subsample(), not the full-
+ *     resolution luminance array -- a single robust statistic, not a per-
+ *     pixel decision, so the subsample is statistically equivalent in
+ *     practice and sorting cost stops scaling with image size.
  *   - refineCoreBall() and the spike colour sampler are scoped to each
  *     star's own bounding box (computeLabelBounds()), not a full-image scan
  *     per star -- cost is proportional to total star footprint area, not
