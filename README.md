@@ -12,6 +12,14 @@ A dialog-based manager for configuring and launching external programs (like, fo
 
 Exports all currently open images as compressed XISF files to a chosen directory, and saves their full processing history as a `.xpsm` process container file and a human-readable `.log` summary. Useful for long-term archival of a finished project in a disk-space saving and open data format way.
 
+### 3-way Compare
+
+Tiles the three most recently used image windows side-by-side horizontally, each filling one column at full workspace height. Designed for ultrawide monitors. If fewer than three windows are open, tiles however many exist.
+
+### Aster
+
+A V8-runtime PJSR port of Aster (originally for Siril/sirilpy), for adding a soft glow and optional diffraction spikes to a stretched, stars-only image. Supports Newtonian (4-arm) and JWST-style (6+2-arm) spike patterns, spectral (rainbow) diffraction tinting, and exclusion masks for glow and spikes independently. Requires PixInsight 1.9.4 "Lockhart" or later.
+
 ---
 
 ## Local Installation (without a script repository)
