@@ -20,6 +20,10 @@ Tiles the three most recently used image windows side-by-side horizontally, each
 
 A V8-runtime PJSR port of Aster (originally for Siril/sirilpy), for adding a soft glow and optional diffraction spikes to a stretched, stars-only image. Supports Newtonian (4-arm) and JWST-style (6+2-arm) spike patterns, spectral (rainbow) diffraction tinting, and exclusion masks for glow and spikes independently. Requires PixInsight 1.9.4 "Lockhart" or later.
 
+### Annotation To Mask
+
+Builds a protection mask straight from an annotations SVG exported from an annotated image (e.g. Script > Render > AnnotateImage, "Export as SVG"). Parses the SVG via PJSR's XMLDocument DOM, composes each shape's `<g transform="matrix(...)">`, and rasterizes every `<ellipse>`/`<circle>` annotation as a filled shape on a new mono mask image (annotation labels and crosshair marks are ignored). Optional grow/feather and invert. Requires PixInsight 1.9.4 "Lockhart" or later.
+
 ---
 
 ## Local Installation (without a script repository)
