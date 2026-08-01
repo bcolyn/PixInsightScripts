@@ -4,15 +4,19 @@
  * SVG (PixInsight's own "Export as SVG" on an annotated image), rather than
  * from the rendered overlay image.
  *
- * The SVG carries the true geometry: each marked object is an <ellipse> (or
- * <circle>) inside a <g transform="matrix(a,b,c,d,e,f)">, positioned in the
- * same coordinate space as the source image's pixels (viewBox width/height
- * == image width/height). This loads it via PJSR's real XMLDocument/
- * XMLElement DOM (XMLDocument.parseFromFile()), walks the element tree
- * composing nested <g> transforms, and rasterizes every ellipse/circle as a
- * filled white shape on an otherwise black canvas -- <text> labels and the
- * small crosshair <polyline>s are simply never matched by tag name, so
- * they're skipped for free. No pixel data is read at all; the mask is built
+ * The SVG carries the true geometry: each sized marked object is an
+ * <ellipse> (or <circle>) inside a <g transform="matrix(a,b,c,d,e,f)">,
+ * positioned in the same coordinate space as the source image's pixels
+ * (viewBox width/height == image width/height). Sizeless DSOs (no measured
+ * diameter) instead get a 4-tick crosshair, each tick a short <polyline> --
+ * optionally protected too, as a plain circle of configurable radius
+ * centred on the crosshair (found by clustering tick endpoints and taking
+ * each cluster's centroid). <text> labels are simply never matched by tag
+ * name, so they're skipped for free.
+ *
+ * Loaded via PJSR's real XMLDocument/XMLElement DOM
+ * (XMLDocument.parseFromFile()), walking the element tree and composing
+ * nested <g> transforms. No pixel data is read at all; the mask is built
  * straight from vector shapes.
  *
  * Targets PixInsight 1.9.4 "Lockhart"'s V8 JavaScript runtime, matching
@@ -41,6 +45,12 @@ function AnnotationMaskParameters() {
    // else is masked off (black/0) -- matches PixInsight's white-is-
    // protected mask convention. true: swap the two.
    this.invert = false;
+   // Sizeless DSOs get a 4-tick crosshair (a <polyline> per tick) instead of
+   // an <ellipse>, since there's no measured diameter to draw. Off by
+   // default -- opt in to also protect them, as a plain circle of
+   // crosshairRadius centred on the crosshair.
+   this.includeCrosshairs = false;
+   this.crosshairRadius = 8;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +91,22 @@ function attrNum(element, name, def) {
    return element.hasAttribute(name) ? parseFloat(element.attributeValue(name)) : def;
 }
 
+function transformPoint(m, x, y) {
+   return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+}
+
+// A <polyline points="x1,y1 x2,y2 ..."/>'s raw (x,y) pairs, in local space.
+function parsePolylinePoints(element) {
+   if (!element.hasAttribute("points")) return [];
+   var tokens = element.attributeValue("points").trim().split(/\s+/).filter(function(s) { return s.length > 0; });
+   var pts = [];
+   for (var i = 0; i < tokens.length; ++i) {
+      var xy = tokens[i].split(",");
+      if (xy.length === 2) pts.push([parseFloat(xy[0]), parseFloat(xy[1])]);
+   }
+   return pts;
+}
+
 function getElementTransform(element) {
    if (!element.hasAttribute("transform")) return [1, 0, 0, 1, 0, 0];
    var m = element.attributeValue("transform").match(/matrix\(([^)]+)\)/);
@@ -90,12 +116,15 @@ function getElementTransform(element) {
 }
 
 // Recursive descent over the element tree, composing each <g>'s transform
-// into the running matrix and collecting every <ellipse>/<circle> as
-// { cx, cy, rx, ry, m } in world (viewBox) space -- m is the full local-to-
-// world matrix to apply at rasterization time. <text> and <polyline> (the
-// crosshair marks) are simply never matched by name, so they're skipped
-// (their subtrees are still walked, harmlessly, in case of stray nesting).
-function walkSvgElement(element, ctm, shapes) {
+// into the running matrix and collecting:
+//  - every <ellipse>/<circle> as { cx, cy, rx, ry, m } in world (viewBox)
+//    space -- m is the full local-to-world matrix to apply at
+//    rasterization time;
+//  - every <polyline> segment's endpoints, already converted to world
+//    space, into segments -- these are the crosshair tick marks PixInsight
+//    draws for sizeless DSOs (4 short ticks around empty space, no
+//    <ellipse>). <text> is simply never matched by name, so it's skipped.
+function walkSvgElement(element, ctm, shapes, segments) {
    var name = element.name;
    if (name === "ellipse" || name === "circle") {
       var cx = attrNum(element, "cx", 0), cy = attrNum(element, "cy", 0);
@@ -106,15 +135,70 @@ function walkSvgElement(element, ctm, shapes) {
          shapes.push({ cx: cx, cy: cy, rx: rx, ry: ry, m: ctm });
       return; // leaf shape -- nothing further to descend into
    }
+   if (name === "polyline") {
+      var pts = parsePolylinePoints(element);
+      if (pts.length === 2)
+         segments.push([transformPoint(ctm, pts[0][0], pts[0][1]), transformPoint(ctm, pts[1][0], pts[1][1])]);
+      return; // leaf shape
+   }
    if (name === "g" || name === "svg")
       ctm = multiplyMatrix(ctm, getElementTransform(element));
    var children = element.childElements();
    for (var i = 0; i < children.length; ++i)
-      walkSvgElement(children[i], ctm, shapes);
+      walkSvgElement(children[i], ctm, shapes, segments);
+}
+
+function median(values) {
+   var n = values.length;
+   if (n === 0) return 0;
+   var sorted = values.slice().sort(function(a, b) { return a - b; });
+   return (n % 2) ? sorted[(n - 1) / 2] : 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]);
+}
+
+// Groups tick endpoints into crosshairs by proximity: within one crosshair
+// the 4 ticks (8 endpoints) sit a few tick-lengths apart; distinct
+// crosshairs are far apart in comparison. The clustering distance is
+// derived from the ticks' own median length, so it adapts to whatever tick
+// size the exporter used rather than assuming a fixed pixel scale. Returns
+// one { x, y } centroid per cluster -- by construction (4 symmetric ticks
+// around the true centre), that centroid is the crosshair's exact position.
+function clusterCrosshairs(segments) {
+   if (segments.length === 0) return [];
+   var lengths = segments.map(function(s) {
+      var dx = s[1][0] - s[0][0], dy = s[1][1] - s[0][1];
+      return FMath.sqrt(dx * dx + dy * dy);
+   });
+   var threshold = FMath.max(median(lengths) * 8, 1);
+   var t2 = threshold * threshold;
+
+   var points = [];
+   for (var i = 0; i < segments.length; ++i) { points.push(segments[i][0]); points.push(segments[i][1]); }
+
+   var n = points.length;
+   var visited = new Uint8Array(n);
+   var centers = [];
+   for (var i = 0; i < n; ++i) {
+      if (visited[i]) continue;
+      visited[i] = 1;
+      var stack = [i], group = [i];
+      while (stack.length > 0) {
+         var cur = stack.pop();
+         for (var j = 0; j < n; ++j) {
+            if (visited[j]) continue;
+            var dx = points[cur][0] - points[j][0], dy = points[cur][1] - points[j][1];
+            if (dx * dx + dy * dy <= t2) { visited[j] = 1; stack.push(j); group.push(j); }
+         }
+      }
+      var sx = 0, sy = 0;
+      for (var k = 0; k < group.length; ++k) { sx += points[group[k]][0]; sy += points[group[k]][1]; }
+      centers.push({ x: sx / group.length, y: sy / group.length });
+   }
+   return centers;
 }
 
 // Loads and parses the SVG, returning { viewBox: {minX,minY,width,height},
-// shapes: [...] }. Throws on a missing/invalid document.
+// shapes: [...], crosshairs: [{x,y}, ...] }. Throws on a missing/invalid
+// document.
 function loadSvgShapes(svgPath) {
    var doc = new XMLDocument;
    doc.parseFromFile(svgPath);
@@ -136,9 +220,9 @@ function loadSvgShapes(svgPath) {
    if (!viewBox)
       throw new Error("no viewBox (or width/height) found on the <svg> element");
 
-   var shapes = [];
-   walkSvgElement(root, [1, 0, 0, 1, 0, 0], shapes);
-   return { viewBox: viewBox, shapes: shapes };
+   var shapes = [], segments = [];
+   walkSvgElement(root, [1, 0, 0, 1, 0, 0], shapes, segments);
+   return { viewBox: viewBox, shapes: shapes, crosshairs: clusterCrosshairs(segments) };
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +385,7 @@ function writeMask(image, w, h, buf) {
 // ---------------------------------------------------------------------------
 
 class AnnotationMaskDialog extends Dialog {
-   constructor(p, svgPath, shapeCount) {
+   constructor(p, svgPath, shapeCount, crosshairCount) {
    super();
    var dlg = this;
 
@@ -314,8 +398,9 @@ class AnnotationMaskDialog extends Dialog {
    this.info.wordWrapping = true;
    this.info.useRichText = true;
    this.info.text = "<p><b>" + svgPath + "</b><br/>" + shapeCount +
-      " ellipse/circle annotation(s) found. Each will be rendered as a filled shape on a new " +
-      "mono mask image the same size as the SVG's viewBox.</p>";
+      " ellipse/circle annotation(s), and " + crosshairCount + " sizeless (crosshair-marked) " +
+      "object(s), found. Each will be rendered as a filled shape on a new mono mask image the " +
+      "same size as the SVG's viewBox.</p>";
 
    function slider(label, min, max, obj, prop, decimals) {
       var c = new NumericControl(dlg);
@@ -346,6 +431,13 @@ class AnnotationMaskDialog extends Dialog {
    this.growCtl = slider("Grow mask (px)", 0, 50, p, "growPixels", 0);
    this.featherCtl = slider("Feather (px)", 0, 50, p, "featherPixels", 1);
 
+   this.crosshairCheck = new CheckBox(this);
+   this.crosshairCheck.text = "Also protect sizeless (crosshair-marked) objects";
+   this.crosshairCheck.checked = p.includeCrosshairs;
+   this.crosshairCheck.onCheck = function(checked) { p.includeCrosshairs = checked; };
+
+   this.crosshairRadiusCtl = slider("Crosshair mark radius (px)", 1, 200, p, "crosshairRadius", 1);
+
    this.invertCheck = new CheckBox(this);
    this.invertCheck.text = "Invert (protect everything except the annotated objects)";
    this.invertCheck.checked = p.invert;
@@ -371,6 +463,10 @@ class AnnotationMaskDialog extends Dialog {
    this.sizer.add(ssRow);
    this.sizer.add(this.growCtl);
    this.sizer.add(this.featherCtl);
+   this.sizer.addSpacing(6);
+   this.sizer.add(this.crosshairCheck);
+   this.sizer.add(this.crosshairRadiusCtl);
+   this.sizer.addSpacing(6);
    this.sizer.add(this.invertCheck);
    this.sizer.addSpacing(8);
    this.sizer.add(buttons);
@@ -397,19 +493,25 @@ function main() {
          APP_TITLE, StdIcon.Error, StdButton.Ok)).execute();
       return;
    }
-   var viewBox = svgResult.viewBox, shapes = svgResult.shapes;
+   var viewBox = svgResult.viewBox, shapes = svgResult.shapes, crosshairs = svgResult.crosshairs;
    var w = FMath.round(viewBox.width), h = FMath.round(viewBox.height);
 
-   if (shapes.length === 0) {
-      (new MessageBox("Annotation To Mask: no <ellipse> or <circle> annotations found in the SVG.",
+   if (shapes.length === 0 && crosshairs.length === 0) {
+      (new MessageBox("Annotation To Mask: no <ellipse>, <circle> or crosshair annotations found in the SVG.",
          APP_TITLE, StdIcon.Error, StdButton.Ok)).execute();
       return;
    }
 
    var p = new AnnotationMaskParameters();
-   var dlg = new AnnotationMaskDialog(p, svgPath, shapes.length);
+   var dlg = new AnnotationMaskDialog(p, svgPath, shapes.length, crosshairs.length);
    if (!dlg.execute())
       return;
+
+   if (p.includeCrosshairs) {
+      var r = FMath.max(p.crosshairRadius, 0.5);
+      for (var ci = 0; ci < crosshairs.length; ++ci)
+         shapes.push({ cx: crosshairs[ci].x, cy: crosshairs[ci].y, rx: r, ry: r, m: [1, 0, 0, 1, 0, 0] });
+   }
 
    console.show();
    console.writeln("Annotation To Mask: rendering " + shapes.length + " shape(s) onto a " +
