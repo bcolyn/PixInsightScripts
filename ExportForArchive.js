@@ -7,14 +7,13 @@
 
 #feature-id    bcolyn.ExportForArchive : Utilities > Export For Archival
 
-#feature-info  A script to export relevant data for archival.<br/>\
+#feature-info  Exports all currently open images as compressed XISF files to a chosen \
+   directory, and saves their full processing history as a .xpsm process container file \
+   and a human-readable .log summary.<br/>\
    <br/>\
-   A utility script for exporting the images in an open format (XISF) as well as the processing history for future reference.<br/>\
-   <br/>\
-   Upon startup, shows a dialog to choose an export directory, which items to export (images, processing history, \
-   processing log), and the XISF compression settings to use for the images.<br/>\
-   <br/>\
-   Copyright &copy; 2020-2021 Benny Colyn
+   Useful for long-term archival of a finished project in a disk-space saving and open data \
+   format (XISF is open, pxiproject is not) way. Requires PixInsight 1.9.4 "Lockhart" or \
+   later.
 
 #define VERSION "1.0.0"
 

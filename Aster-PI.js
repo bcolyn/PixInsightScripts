@@ -31,7 +31,11 @@
  */
 
 #feature-id    bcolyn.Aster : Render > Aster
-#feature-info  Glow and optional diffraction spikes for a stretched, stars-only image (V8 runtime).
+#feature-info  A V8-runtime PJSR port of Aster (originally for Siril/sirilpy), for adding \
+               a soft glow and optional diffraction spikes to a stretched, stars-only image. \
+               Supports Newtonian (4-arm) and JWST-style (6+2-arm) spike patterns, spectral \
+               (rainbow) diffraction tinting, and exclusion masks for glow and spikes \
+               independently. Requires PixInsight 1.9.4 "Lockhart" or later.
 
 #define APP_TITLE "Aster"
 

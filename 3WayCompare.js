@@ -9,7 +9,10 @@
 //   - If fewer than 3 windows are open, tiles however many exist.
 
 #feature-id    bcolyn.ThreeWayCompare : Utilities > 3-way Compare
-#feature-info  Tiles three image windows side-by-side for ultrawide screens.
+#feature-info  Tiles the three most recently used image windows side-by-side \
+               horizontally, each filling one column at full workspace height. \
+               Nice when comparing A,B and a ground truth image. Especially \
+               useful for ultrawide monitors.
 
 (function () {
 

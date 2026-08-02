@@ -27,7 +27,10 @@
  */
 
 #feature-id    bcolyn.AnnotationMask : Mask > Annotation To Mask
-#feature-info  Builds a protection mask by rasterizing the ellipse/circle annotations from an exported SVG (V8 runtime).
+#feature-info  Builds a protection mask from an annotations SVG created by AnnotateImage \
+               (Script > Render > AnnotateImage, Output Mode = "Generate SVG overlay"). \
+               Useful for quickly building a mask that protects most of the small (PGC etc) \
+               galaxies in an image. Requires PixInsight 1.9.4 "Lockhart" or later.
 
 #define APP_TITLE "Annotation To Mask"
 

@@ -6,9 +6,11 @@
 #feature-id    bcolyn.ExternalToolsLauncher : Utilities > ExternalToolsLauncher
 
 #feature-info  A dialog-based manager for configuring and launching external \
-               programs from within PixInsight. Supports token substitution in \
-               argument templates, FITS export of the active image, and live \
-               capture of process stdout/stderr.
+               programs (like, for example your own astropy scripts) from within \
+               PixInsight. Supports a persistent list of tools, token substitution \
+               in argument templates (e.g. {fits_path}, {output_dir}), automatic \
+               FITS export of the active image, and live capture of process \
+               stdout/stderr in the PixInsight console.
 
 #feature-icon  @script_icons_dir/ExternalToolsLauncher.png
 
