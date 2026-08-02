@@ -4,7 +4,7 @@
       <p>Benny Colyn&apos;s PixInsight Scripts</p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="bcolyn-scripts-20260802083542.zip" sha1="ac731f5fa807ff16ada368445b8885b1c36ebce0" type="script" releaseDate="20260802">
+      <package fileName="bcolyn-scripts-20260802090950.zip" sha1="212876d8d536278573afd24a6409b26b353e09bb" type="script" releaseDate="20260802">
          <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.02</title>
          <description>
             <p>Utilities &gt; 3-way Compare: Tiles the three most recently used image windows side-by-side horizontally, each filling one column at full workspace height. Nice when comparing A,B and a ground truth image. Especially useful for ultrawide monitors.</p>
@@ -16,4 +16,4 @@
       </package>
    </platform>
 </xri>
-<Signature developerId="bcolyn" timestamp="2026-08-02T06:35:51.465Z" encoding="Base64">qPcu7eoLfBX1zAnt5cPwuwt//+scGOXTDzGmnlQc3D86d5ueEqa0Wmn9AtbwEd2reAICb0a5n0VObeSwMvWMCA==</Signature>
+<Signature developerId="bcolyn" timestamp="2026-08-02T07:09:57.460Z" encoding="Base64">CDG3Qe5W/d6BStuLdE59HM4GOp+rnEuTB0QRJ2WPUqUXxbeJIpVb/w4FuPzXk9AOGdkXBPsv09sE1iLkYoO0DA==</Signature>

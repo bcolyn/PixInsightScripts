@@ -44,9 +44,11 @@ function AnnotationMaskParameters() {
    this.supersample = 3;   // NxN sub-pixel samples per pixel for anti-aliased edges
    this.growPixels = 0;    // dilate the mask by this many pixels, 0 = off
    this.featherPixels = 0; // Gaussian-blur the mask edges by this radius, 0 = off
-   // false (default): marked objects are protected (white/1), everything
-   // else is masked off (black/0) -- matches PixInsight's white-is-
-   // protected mask convention. true: swap the two.
+   // false (default): marked objects are protected (black/0), everything
+   // else is left open to processing (white/1) -- matches PixInsight's
+   // mask convention where a process applies fully through white and is
+   // blocked by black. true: swap the two, protecting everything except
+   // the annotated objects.
    this.invert = false;
    // Sizeless DSOs get a 4-tick crosshair (a <polyline> per tick) instead of
    // an <ellipse>, since there's no measured diameter to draw. Off by
@@ -532,7 +534,7 @@ function main() {
          console.writeln("Annotation To Mask: feathering mask by " + p.featherPixels + "px...");
          mask = gaussianBlur(mask, w, h, p.featherPixels);
       }
-      if (p.invert) {
+      if (!p.invert) {
          for (var i = 0; i < mask.length; ++i) mask[i] = 1 - mask[i];
       }
 
