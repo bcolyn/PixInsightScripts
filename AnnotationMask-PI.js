@@ -26,7 +26,7 @@
  * (c) Benny Colyn 2026. MIT License (see repository LICENSE).
  */
 
-#feature-id    Mask > Annotation To Mask
+#feature-id    bcolyn.AnnotationMask : Mask > Annotation To Mask
 #feature-info  Builds a protection mask by rasterizing the ellipse/circle annotations from an exported SVG (V8 runtime).
 
 #define APP_TITLE "Annotation To Mask"

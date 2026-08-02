@@ -8,7 +8,7 @@
 //   - Each window fills one column at full workspace height.
 //   - If fewer than 3 windows are open, tiles however many exist.
 
-#feature-id    Utilities > 3-way Compare
+#feature-id    bcolyn.ThreeWayCompare : Utilities > 3-way Compare
 #feature-info  Tiles three image windows side-by-side for ultrawide screens.
 
 (function () {

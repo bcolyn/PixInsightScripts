@@ -5,7 +5,7 @@
 * (c) Benny Colyn 2020-2021
 */
 
-#feature-id    Utilities > Export For Archival
+#feature-id    bcolyn.ExportForArchive : Utilities > Export For Archival
 
 #feature-info  A script to export relevant data for archival.<br/>\
    <br/>\

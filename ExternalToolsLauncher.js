@@ -3,7 +3,7 @@
 // PixInsight JavaScript Runtime (PJSR) Script
 // ****************************************************************************
 
-#feature-id    Utilities > ExternalToolsLauncher
+#feature-id    bcolyn.ExternalToolsLauncher : Utilities > ExternalToolsLauncher
 
 #feature-info  A dialog-based manager for configuring and launching external \
                programs from within PixInsight. Supports token substitution in \

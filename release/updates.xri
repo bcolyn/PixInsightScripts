@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xri version="1.0">
+   <description>
+      <p>Benny Colyn&apos;s PixInsight Scripts</p>
+   </description>
+   <platform os="all" arch="noarch" version="1.8.8:1.9.9">
+      <package fileName="bcolyn-scripts-20260802075200.zip" sha1="2b14281c00bfd0f9af3c989dbc24cfbefee23e6a" type="script" releaseDate="20260802">
+         <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.02</title>
+         <description>
+            <p>Utilities &gt; 3-way Compare: Tiles three image windows side-by-side for ultrawide screens.</p>
+            <p>Mask &gt; Annotation To Mask: Builds a protection mask by rasterizing the ellipse/circle annotations from an exported SVG (V8 runtime).</p>
+            <p>Render &gt; Aster: Glow and optional diffraction spikes for a stretched, stars-only image (V8 runtime).</p>
+            <p>Utilities &gt; Export For Archival: A script to export relevant data for archival.</p>
+            <p>Utilities &gt; ExternalToolsLauncher: A dialog-based manager for configuring and launching external programs from within PixInsight. Supports token substitution in argument templates, FITS export of the active image, and live capture of process stdout/stderr.</p>
+         </description>
+      </package>
+   </platform>
+</xri>
+<Signature developerId="bcolyn" timestamp="2026-08-02T05:52:25.642Z" encoding="Base64">loU5J8tNaCoLUucpXj+nEdTr0iH4OYBx5R3S2Z9/iYolTZvSOlBn9LBGIUKg2nSGu57mQcxTZVxTU4O8U5f5Cw==</Signature>

@@ -30,7 +30,7 @@
  * License: GPL-3.0-or-later (matching the source script's license)
  */
 
-#feature-id    Render > Aster
+#feature-id    bcolyn.Aster : Render > Aster
 #feature-info  Glow and optional diffraction spikes for a stretched, stars-only image (V8 runtime).
 
 #define APP_TITLE "Aster"
