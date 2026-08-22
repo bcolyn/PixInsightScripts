@@ -24,6 +24,10 @@ Exports all currently open images as compressed XISF files to a chosen directory
 
 A dialog-based manager for configuring and launching external programs (like, for example your own astropy scripts) from within PixInsight. Supports a persistent list of tools, token substitution in argument templates (e.g. `{fits_path}`, `{output_dir}`), automatic FITS export of the active image, and live capture of process stdout/stderr in the PixInsight console.
 
+### Fetch HiPS Reference
+
+Downloads a reference image cutout from a CDS HiPS survey (DSS2, SDSS9, PanSTARRS, in colour or single band) matching the astrometric solution of an open, plate-solved image, using the hips2fits service. The cutout is requested at the source image's dimensions, field of view and rotation — mirrored solutions included — so it can be blinked against the original to check whether faint structure is real. A blank result is not an error: it means the chosen survey has no coverage at those coordinates. FITS cutouts of the 16-bit single-band surveys can optionally be rescaled to [0,1], since they otherwise open as a flat grey. Requires PixInsight 1.9.4 "Lockhart" or later and an image with an astrometric solution.
+
 ---
 
 ## Local Installation (without a script repository)
