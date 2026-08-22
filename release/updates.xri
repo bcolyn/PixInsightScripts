@@ -4,16 +4,17 @@
       <p>Benny Colyn&apos;s PixInsight Scripts</p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="bcolyn-scripts-20260802090950.zip" sha1="212876d8d536278573afd24a6409b26b353e09bb" type="script" releaseDate="20260802">
-         <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.02</title>
+      <package fileName="bcolyn-scripts-20260822140152.zip" sha1="4c76f360f03aaacb4223413781a001c42f6ac432" type="script" releaseDate="20260822">
+         <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.22</title>
          <description>
             <p>Utilities &gt; 3-way Compare: Tiles the three most recently used image windows side-by-side horizontally, each filling one column at full workspace height. Nice when comparing A,B and a ground truth image. Especially useful for ultrawide monitors.</p>
             <p>Mask &gt; Annotation To Mask: Builds a protection mask from an annotations SVG created by AnnotateImage (Script &gt; Render &gt; AnnotateImage, Output Mode = &quot;Generate SVG overlay&quot;). Useful for quickly building a mask that protects most of the small (PGC etc) galaxies in an image. Requires PixInsight 1.9.4 &quot;Lockhart&quot; or later.</p>
             <p>Render &gt; Aster: A V8-runtime PJSR port of Aster (originally for Siril/sirilpy), for adding a soft glow and optional diffraction spikes to a stretched, stars-only image. Supports Newtonian (4-arm) and JWST-style (6+2-arm) spike patterns, spectral (rainbow) diffraction tinting, and exclusion masks for glow and spikes independently. Requires PixInsight 1.9.4 &quot;Lockhart&quot; or later.</p>
             <p>Utilities &gt; Export For Archival: Exports all currently open images as compressed XISF files to a chosen directory, and saves their full processing history as a .xpsm process container file and a human-readable .log summary.</p>
             <p>Utilities &gt; ExternalToolsLauncher: A dialog-based manager for configuring and launching external programs (like, for example your own astropy scripts) from within PixInsight. Supports a persistent list of tools, token substitution in argument templates (e.g. {fits_path}, {output_dir}), automatic FITS export of the active image, and live capture of process stdout/stderr in the PixInsight console.</p>
+            <p>Utilities &gt; Fetch HiPS Reference: Downloads a reference image cutout from a CDS HiPS survey (DSS2, SDSS9, PanSTARRS, in colour or single band) matching the astrometric solution of an open, plate-solved image, using the hips2fits service. The cutout is requested at the source image&apos;s dimensions, field of view and rotation -- mirrored solutions included -- so it can be blinked against the original to check whether faint structure is real. A blank result is not an error: it means the chosen survey has no coverage at those coordinates. FITS cutouts of the 16-bit single-band surveys can optionally be rescaled to [0,1], since they otherwise open as a flat grey. Requires PixInsight 1.9.4 &quot;Lockhart&quot; or later and an image with an astrometric solution.</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="bcolyn" timestamp="2026-08-02T07:09:57.460Z" encoding="Base64">CDG3Qe5W/d6BStuLdE59HM4GOp+rnEuTB0QRJ2WPUqUXxbeJIpVb/w4FuPzXk9AOGdkXBPsv09sE1iLkYoO0DA==</Signature>
+<Signature developerId="bcolyn" timestamp="2026-08-22T12:04:26.097Z" encoding="Base64">Mh/Ci0MvXAclX55Z59W/y3ihWEet4eQ4TnDg26v23oJ7uehcaOu3MoCF5WniOjT7X05+/dGvD0BXPFWclzcwDA==</Signature>
