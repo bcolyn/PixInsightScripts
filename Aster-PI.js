@@ -39,6 +39,8 @@
 
 #define APP_TITLE "Aster"
 
+#include <pjsr/DataType.jsh>
+
 CoreApplication.ensureMinimumVersion(1, 9, 4);
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,94 @@ function AsterParameters() {
    // "spikes" gate, matching the original (mask_spikes applies to both).
    this.maskGlow   = true;
    this.maskSpikes = true;
+}
+
+// ---------------------------------------------------------------------------
+// Enumerated parameter values (shared by the dialog and settings validation)
+// ---------------------------------------------------------------------------
+
+var BLUR_MODES = ["Gaussian", "Multi-scale Gaussian", "Moffat", "Triangle", "Box", "Disk"];
+var DOWNSAMPLE_FACTORS = [1, 2, 4, 8];
+var DOWNSAMPLE_LABELS = ["1:1 (off)", "1:2", "1:4", "1:8"];
+var SPIKE_TYPES = ["Newtonian", "JWST"];
+
+// ---------------------------------------------------------------------------
+// Persistent settings
+// ---------------------------------------------------------------------------
+//
+// The whole parameter set is stored as one JSON string under a single key, so
+// adding a control later doesn't need a new key or a migration. On load the
+// stored values are merged into a fresh AsterParameters() key by key: anything
+// the defaults don't know about, or that has the wrong type, is ignored. That
+// keeps a stale or hand-edited settings blob from injecting junk properties.
+
+#define SETTINGS_KEY "Aster/parameters"
+
+function mergeParameters(target, source) {
+   for (var key in target) {
+      if (!Object.prototype.hasOwnProperty.call(target, key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      var def = target[key], value = source[key];
+      if (def !== null && typeof def === "object") {
+         if (value !== null && typeof value === "object")
+            mergeParameters(def, value);
+      } else if (def !== null && typeof def === typeof value) {
+         target[key] = value;
+      }
+   }
+}
+
+// Enum-valued parameters survive the type check above but can still name a
+// mode this build doesn't have; fall those back to the defaults.
+function validateParameters(p) {
+   var d = new AsterParameters();
+   if (BLUR_MODES.indexOf(p.glow.blurMode) < 0) p.glow.blurMode = d.glow.blurMode;
+   if (DOWNSAMPLE_FACTORS.indexOf(p.glow.downsample) < 0) p.glow.downsample = d.glow.downsample;
+   if (SPIKE_TYPES.indexOf(p.spike.spikeType) < 0) p.spike.spikeType = d.spike.spikeType;
+}
+
+function loadParameters(p) {
+   var text = Settings.read(SETTINGS_KEY, DataType_UCString);
+   if (!Settings.lastReadOK || !text)
+      return;
+   var data;
+   try {
+      data = JSON.parse(text);
+   } catch (e) {
+      console.warningln("Aster: ignoring unreadable saved settings (" + e + ").");
+      return;
+   }
+   if (data === null || typeof data !== "object")
+      return;
+   mergeParameters(p, data);
+   validateParameters(p);
+}
+
+function saveParameters(p) {
+   var data = {};
+   for (var key in p) {
+      if (!Object.prototype.hasOwnProperty.call(p, key)) continue;
+      if (key === "exclusionView") continue; // a live View, not a setting
+      data[key] = p[key];
+   }
+   Settings.write(SETTINGS_KEY, DataType_UCString, JSON.stringify(data));
+}
+
+// Restores defaults in place: the dialog's controls hold references to p.glow
+// / p.spike / p.secondary, so those objects must be refilled, not replaced.
+function resetParameters(p) {
+   var d = new AsterParameters();
+   for (var key in d) {
+      if (!Object.prototype.hasOwnProperty.call(d, key)) continue;
+      var value = d[key];
+      if (value !== null && typeof value === "object") {
+         for (var sub in value)
+            if (Object.prototype.hasOwnProperty.call(value, sub))
+               p[key][sub] = value[sub];
+      } else {
+         p[key] = value;
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,7 +1340,8 @@ class AsterDialog extends Dialog {
    this.info.useRichText = true;
    this.info.text = "<p>Runs on the active image or the active Preview. Optionally pick a " +
       "mono image below as an exclusion mask (1 = fully protected) &mdash; it must match the " +
-      "target's pixel dimensions. Detection, glow and spikes all share one star catalog.</p>";
+      "target's pixel dimensions. Detection, glow and spikes all share one star catalog. " +
+      "Settings are remembered between runs; <i>Reset</i> restores the defaults.</p>";
 
    this.maskLabel = new Label(this);
    this.maskLabel.text = "Exclusion mask:";
@@ -1295,22 +1386,19 @@ class AsterDialog extends Dialog {
    this.blurLabel = new Label(this);
    this.blurLabel.text = "Blur mode:";
    this.blurCombo = new ComboBox(this);
-   var blurModes = ["Gaussian", "Multi-scale Gaussian", "Moffat", "Triangle", "Box", "Disk"];
-   for (var i = 0; i < blurModes.length; ++i) this.blurCombo.addItem(blurModes[i]);
-   this.blurCombo.currentItem = FMath.max(0, blurModes.indexOf(p.glow.blurMode));
-   this.blurCombo.onItemSelected = function(index) { p.glow.blurMode = blurModes[index]; };
+   for (var i = 0; i < BLUR_MODES.length; ++i) this.blurCombo.addItem(BLUR_MODES[i]);
+   this.blurCombo.currentItem = FMath.max(0, BLUR_MODES.indexOf(p.glow.blurMode));
+   this.blurCombo.onItemSelected = function(index) { p.glow.blurMode = BLUR_MODES[index]; };
 
    this.downsampleLabel = new Label(this);
    this.downsampleLabel.text = "  Blur working scale:";
    this.downsampleCombo = new ComboBox(this);
-   var downsampleFactors = [1, 2, 4, 8];
-   var downsampleLabels = ["1:1 (off)", "1:2", "1:4", "1:8"];
-   for (var i = 0; i < downsampleLabels.length; ++i) this.downsampleCombo.addItem(downsampleLabels[i]);
-   this.downsampleCombo.currentItem = FMath.max(0, downsampleFactors.indexOf(p.glow.downsample));
+   for (var i = 0; i < DOWNSAMPLE_LABELS.length; ++i) this.downsampleCombo.addItem(DOWNSAMPLE_LABELS[i]);
+   this.downsampleCombo.currentItem = FMath.max(0, DOWNSAMPLE_FACTORS.indexOf(p.glow.downsample));
    this.downsampleCombo.toolTip = "Computes the glow blur at a reduced working resolution, then " +
       "upsamples the result. Speeds up large-radius blur (especially Disk/Moffat) with little to " +
       "no visible difference; push it higher only if the radius is large enough to tolerate it.";
-   this.downsampleCombo.onItemSelected = function(index) { p.glow.downsample = downsampleFactors[index]; };
+   this.downsampleCombo.onItemSelected = function(index) { p.glow.downsample = DOWNSAMPLE_FACTORS[index]; };
 
    var blurRow = new HorizontalSizer;
    blurRow.spacing = 6;
@@ -1335,10 +1423,9 @@ class AsterDialog extends Dialog {
    this.spikeTypeLabel = new Label(this);
    this.spikeTypeLabel.text = "Spike type:";
    this.spikeTypeCombo = new ComboBox(this);
-   var spikeTypes = ["Newtonian", "JWST"];
-   for (var i = 0; i < spikeTypes.length; ++i) this.spikeTypeCombo.addItem(spikeTypes[i]);
-   this.spikeTypeCombo.currentItem = FMath.max(0, spikeTypes.indexOf(p.spike.spikeType));
-   this.spikeTypeCombo.onItemSelected = function(index) { p.spike.spikeType = spikeTypes[index]; };
+   for (var i = 0; i < SPIKE_TYPES.length; ++i) this.spikeTypeCombo.addItem(SPIKE_TYPES[i]);
+   this.spikeTypeCombo.currentItem = FMath.max(0, SPIKE_TYPES.indexOf(p.spike.spikeType));
+   this.spikeTypeCombo.onItemSelected = function(index) { p.spike.spikeType = SPIKE_TYPES[index]; };
    var spikeTypeRow = new HorizontalSizer;
    spikeTypeRow.spacing = 6;
    spikeTypeRow.add(this.spikeTypeLabel);
@@ -1372,6 +1459,51 @@ class AsterDialog extends Dialog {
    this.secondaryLengthCtl   = slider("Secondary length (px)", 2, 400, p.secondary, "length", 0);
    this.secondaryWidthCtl    = slider("Secondary width (px)", 0, 20, p.secondary, "width", 2);
 
+   // Pushes p back into every control, after the parameters have been changed
+   // behind the dialog's back (currently: Reset to defaults).
+   this.updateControls = function() {
+      dlg.blackCtl.setValue(p.detectionBlack);
+      dlg.whiteCtl.setValue(p.detectionWhite);
+      dlg.maskGlowCheck.checked = p.maskGlow;
+      dlg.maskSpikesCheck.checked = p.maskSpikes;
+
+      dlg.glowCheck.checked = p.glowEnabled;
+      dlg.blurCombo.currentItem = FMath.max(0, BLUR_MODES.indexOf(p.glow.blurMode));
+      dlg.downsampleCombo.currentItem = FMath.max(0, DOWNSAMPLE_FACTORS.indexOf(p.glow.downsample));
+      dlg.diameterCtl.setValue(p.glow.minDiameter);
+      dlg.featherCtl.setValue(p.glow.feather);
+      dlg.radiusCtl.setValue(p.glow.radius);
+      dlg.gammaCtl.setValue(p.glow.gamma);
+      dlg.strengthCtl.setValue(p.glow.strength);
+      dlg.blendCtl.setValue(p.glow.blend);
+
+      dlg.spikesCheck.checked = p.spikesEnabled;
+      dlg.spikeTypeCombo.currentItem = FMath.max(0, SPIKE_TYPES.indexOf(p.spike.spikeType));
+      dlg.spikeDiameterCtl.setValue(p.spike.minDiameter);
+      dlg.spikeFeatherCtl.setValue(p.spike.feather);
+      dlg.spikeLengthCtl.setValue(p.spike.length);
+      dlg.spikeWidthCtl.setValue(p.spike.width);
+      dlg.spikeAngleCtl.setValue(p.spike.angle);
+      dlg.spikeStrengthCtl.setValue(p.spike.strength);
+      dlg.spikeBlendCtl.setValue(p.spike.blend);
+
+      dlg.spectralCheck.checked = p.spike.spectral;
+      dlg.spectralStrengthCtl.setValue(p.spike.spectralStrength);
+      dlg.spectralSaturationCtl.setValue(p.spike.spectralSaturation);
+
+      dlg.secondaryCheck.checked = p.secondaryEnabled;
+      dlg.secondaryDiameterCtl.setValue(p.secondary.minDiameter);
+      dlg.secondaryFeatherCtl.setValue(p.secondary.feather);
+      dlg.secondaryStrengthCtl.setValue(p.secondary.strength);
+      dlg.secondaryLengthCtl.setValue(p.secondary.length);
+      dlg.secondaryWidthCtl.setValue(p.secondary.width);
+   };
+
+   this.resetButton = new PushButton(this);
+   this.resetButton.text = "Reset";
+   this.resetButton.toolTip = "Restores the factory defaults. The saved settings are only " +
+      "overwritten when you click Apply.";
+   this.resetButton.onClick = function() { resetParameters(p); dlg.updateControls(); };
    this.okButton = new PushButton(this);
    this.okButton.text = "Apply";
    this.okButton.onClick = function() { dlg.ok(); };
@@ -1380,6 +1512,7 @@ class AsterDialog extends Dialog {
    this.cancelButton.onClick = function() { dlg.cancel(); };
    var buttons = new HorizontalSizer;
    buttons.spacing = 6;
+   buttons.add(this.resetButton);
    buttons.addStretch();
    buttons.add(this.okButton);
    buttons.add(this.cancelButton);
@@ -1442,9 +1575,11 @@ function main() {
 
    var p = new AsterParameters();
    p.exclusionView = null;
+   loadParameters(p); // last settings used, if any
    var dlg = new AsterDialog(p);
    if (!dlg.execute())
       return;
+   saveParameters(p);
 
    console.show();
    console.writeln("Aster: reading pixel data...");
