@@ -4,10 +4,10 @@
       <p>Benny Colyn&apos;s PixInsight Scripts</p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="bcolyn-scripts-20260822140152.zip" sha1="4c76f360f03aaacb4223413781a001c42f6ac432" type="script" releaseDate="20260822">
-         <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.22</title>
+      <package fileName="bcolyn-scripts-20260831104237.zip" sha1="77f57111d78dec7947c6a7d8bfb3b0bf9cfd96d6" type="script" releaseDate="20260831">
+         <title>Benny Colyn&apos;s PixInsight Scripts v2026.08.31</title>
          <description>
-            <p>Utilities &gt; 3-way Compare: Tiles the three most recently used image windows side-by-side horizontally, each filling one column at full workspace height. Nice when comparing A,B and a ground truth image. Especially useful for ultrawide monitors.</p>
+            <p>Utilities &gt; 3-way Compare: Tiles up to three selected image windows side-by-side horizontally, each filling one column at full workspace height. Nice when comparing A,B and a ground truth image. Especially useful for ultrawide monitors.</p>
             <p>Mask &gt; Annotation To Mask: Builds a protection mask from an annotations SVG created by AnnotateImage (Script &gt; Render &gt; AnnotateImage, Output Mode = &quot;Generate SVG overlay&quot;). Useful for quickly building a mask that protects most of the small (PGC etc) galaxies in an image. Requires PixInsight 1.9.4 &quot;Lockhart&quot; or later.</p>
             <p>Render &gt; Aster: A V8-runtime PJSR port of Aster (originally for Siril/sirilpy), for adding a soft glow and optional diffraction spikes to a stretched, stars-only image. Supports Newtonian (4-arm) and JWST-style (6+2-arm) spike patterns, spectral (rainbow) diffraction tinting, and exclusion masks for glow and spikes independently. Requires PixInsight 1.9.4 &quot;Lockhart&quot; or later.</p>
             <p>Utilities &gt; Export For Archival: Exports all currently open images as compressed XISF files to a chosen directory, and saves their full processing history as a .xpsm process container file and a human-readable .log summary.</p>
@@ -17,4 +17,4 @@
       </package>
    </platform>
 </xri>
-<Signature developerId="bcolyn" timestamp="2026-08-22T12:04:26.097Z" encoding="Base64">Mh/Ci0MvXAclX55Z59W/y3ihWEet4eQ4TnDg26v23oJ7uehcaOu3MoCF5WniOjT7X05+/dGvD0BXPFWclzcwDA==</Signature>
+<Signature developerId="bcolyn" timestamp="2026-08-31T08:43:06.503Z" encoding="Base64">e39npxhf7golSMDlvh9KQX1pWuhq0IYkP0VhtVVoJfvAk0xkJ2OML443JkXLfKSVtoQoB0DSp5Diy+b4hoOCBw==</Signature>
