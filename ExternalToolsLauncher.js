@@ -1043,18 +1043,21 @@ ExternalToolsLauncherDialog.prototype.onLaunch = function () {
 
    // ---- Capture output ----
    // readAllStandardOutput() / readAllStandardError() return ByteArray objects;
-   // call toString() to obtain a UTF-8 string.
+   // call utf8ToString() to decode them. Not toString(), whose optional
+   // arguments are a (startIndex, count) byte range -- passing an encoding name
+   // there throws "unsigned integer value expected", which the catch below
+   // swallows, silently losing all captured output.
    var stdoutRaw = "";
    var stderrRaw = "";
    try {
       var outBytes = proc.readAllStandardOutput();
       if ( outBytes && outBytes.length > 0 )
-         stdoutRaw = outBytes.toString( "UTF-8" );
+         stdoutRaw = outBytes.utf8ToString();
    } catch ( _ ) {}
    try {
       var errBytes = proc.readAllStandardError();
       if ( errBytes && errBytes.length > 0 )
-         stderrRaw = errBytes.toString( "UTF-8" );
+         stderrRaw = errBytes.utf8ToString();
    } catch ( _ ) {}
 
    var exitCode = -1;
