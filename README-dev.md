@@ -38,13 +38,13 @@ If signing the release (see below), sign the scripts *before* this step and sign
 
 ## Code signing
 
-Scripts in the repo root and `release/updates.xri` can be signed with a Certified PixInsight Developer (or local) signing identity, using [tools/SignRelease.js](tools/SignRelease.js) — a PJSR script run from inside PixInsight (**Script > Feature Scripts…**, add `tools/`, then **Script > Development > Sign Release**). It needs a `.xssk` secure signing keys file, created once via PixInsight's built-in **SigningKeys** script.
+Scripts in the repo root and `release/updates.xri` can be signed with a Certified PixInsight Developer (or local) signing identity, using PixInsight's built-in **CodeSign** script (**Script > Development > CodeSign**). It needs a `.xssk` secure signing keys file, created once via PixInsight's built-in **SigningKeys** script.
 
 Full release cycle, once a `.xssk` file exists:
 
-1. In PixInsight, run **Sign Release > Sign Scripts (.js → .xsgn)** — signs every `.js` at the repo root, writing a companion `<name>.xsgn` beside each.
+1. In PixInsight, run **Script > Development > CodeSign** on every `.js` at the repo root (not the ones in `unsigned/`), writing a companion `<name>.xsgn` beside each.
 2. `python build-release.py` — bundles each `.js` together with its `.xsgn` (if present) into the zip, and writes an unsigned `updates.xri`.
-3. In PixInsight, run **Sign Release > Sign updates.xri** — signs the freshly rebuilt `updates.xri` in place (must happen *after* step 2, since the signature covers the final file contents).
+3. In PixInsight, run **Script > Development > CodeSign** on the freshly rebuilt `release/updates.xri`, signing it in place (must happen *after* step 2, since the signature covers the final file contents).
 4. Commit and push `release/` and `release-unsigned/`.
 
 The `.xssk` file and the loose `.xsgn` files at the repo root are gitignored — never commit private key material. The `.xsgn` files only need to exist long enough for step 2 to bundle them into the zip.

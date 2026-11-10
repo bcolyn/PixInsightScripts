@@ -218,11 +218,11 @@ def build_repo(repo, args):
                 stale.append(item["file"])
         print(f"  - {item['file']} ({item['feature_id'] or 'no feature-id'}){tag}")
     print(f"  sha1: {sha1}")
-    note = "unsigned -- sign with tools/SignRelease.js" if repo.signed else "intentionally unsigned"
+    note = "unsigned -- sign with Script > Development > CodeSign" if repo.signed else "intentionally unsigned"
     print(f"  Wrote {repo.release_dir / 'updates.xri'} ({note})")
     if stale:
         print(f"\nWARNING: {len(stale)} script(s) were edited after signing and were bundled "
-              f"WITHOUT their stale .xsgn. Re-sign in tools/SignRelease.js, then rebuild: "
+              f"WITHOUT their stale .xsgn. Re-sign with Script > Development > CodeSign, then rebuild: "
               + ", ".join(stale))
 
 
