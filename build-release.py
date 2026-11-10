@@ -24,6 +24,7 @@ VENDOR = "bcolyn"
 ZIP_STEM = "bcolyn-scripts"
 REPO_TITLE = "Benny Colyn's PixInsight Scripts"
 PLATFORM_VERSION_RANGE = "1.8.8:1.9.9"
+GPL_LICENSE_FILE = "LICENSE-GPL-3.0.txt"
 
 FEATURE_INFO_RE = re.compile(r"^#feature-info\s+(.*)$")
 CONTINUATION_RE = re.compile(r"^\s*(.*)$")
@@ -106,6 +107,10 @@ def build_zip(scripts, zip_path):
             if signature_status(path) == "fresh":
                 signature = path.with_suffix(".xsgn")
                 zf.write(signature, f"src/scripts/{VENDOR}/{signature.name}")
+        # Aster-PI.js is GPL-3.0-or-later (ported from a GPL script); the GPL
+        # requires the license text to travel with distributed copies.
+        if any(p.name == "Aster-PI.js" for p in scripts):
+            zf.write(ROOT / GPL_LICENSE_FILE, f"src/scripts/{VENDOR}/{GPL_LICENSE_FILE}")
 
 
 def sha1_of(path):

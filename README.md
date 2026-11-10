@@ -58,3 +58,7 @@ Then run **Resources > Updates > Check for Updates…** to install/update all sc
 ---
 
 For instructions on installing without the update repository, building releases, and code signing, see [README-dev.md](README-dev.md).
+
+## License
+
+The repository as a whole is MIT licensed, see [LICENSE](LICENSE). The exception is **Aster** (`Aster-PI.js`), a port of a GPL-licensed script, which is licensed under the **GNU General Public License v3.0 or later**; the full text is in [LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt) and is included in the release package alongside the script.
