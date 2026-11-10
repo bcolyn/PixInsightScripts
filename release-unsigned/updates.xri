@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xri version="1.0">
+   <description>
+      <p>Benny Colyn's PixInsight Scripts (unsigned)</p>
+   </description>
+   <platform os="all" arch="noarch" version="1.8.8:1.9.9">
+      <package fileName="bcolyn-scripts-unsigned-20261110203258.zip" sha1="f3743ed1fb15bbdbdf43145158106d1f3bae4529" type="script" releaseDate="20261110">
+         <title>Benny Colyn's PixInsight Scripts (unsigned) v2026.11.10</title>
+         <description>
+            <p>Utilities &gt; ExternalToolsLauncher: A dialog-based manager for configuring and launching external programs (like, for example your own astropy scripts) from within PixInsight. Supports a persistent list of tools, token substitution in argument templates (e.g. {fits_path}, {output_dir}), automatic FITS export of the active image, and live capture of process stdout/stderr in the PixInsight console.</p>
+         </description>
+      </package>
+   </platform>
+</xri>

@@ -55,6 +55,16 @@ https://raw.githubusercontent.com/bcolyn/PixInsightScripts/master/release/
 
 Then run **Resources > Updates > Check for Updates…** to install/update all scripts under `Script` categories declared by their `#feature-id` directives.
 
+### Unsigned repository
+
+Scripts that are not code-signed (currently only **ExternalToolsLauncher**, which launches external programs) are published in a separate repository. Add it the same way, using:
+
+```
+https://raw.githubusercontent.com/bcolyn/PixInsightScripts/master/release-unsigned/
+```
+
+PixInsight will ask for confirmation before downloading from it, since it carries no signature.
+
 ---
 
 For instructions on installing without the update repository, building releases, and code signing, see [README-dev.md](README-dev.md).

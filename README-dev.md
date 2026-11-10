@@ -25,20 +25,27 @@ After changing any script, regenerate the repository files:
 python build-release.py
 ```
 
-This rebuilds `release/bcolyn-scripts-<timestamp>.zip` (all `.js` files, packaged under `src/scripts/bcolyn/`) and `release/updates.xri`. The timestamped filename changes on every build so CDN/proxy caches (e.g. raw.githubusercontent.com) never serve a stale zip for a new `updates.xri`; the previous zip is deleted automatically since only the latest is ever referenced.
+This builds two update repositories:
 
-If signing the release (see below), sign the scripts *before* this step and sign `updates.xri` *after* it. Otherwise, just commit and push `release/`.
+- `release/` — the **signed** repository: every `.js` in the repo root (bundled with its `.xsgn`), packaged under `src/scripts/bcolyn/`, plus `updates.xri`.
+- `release-unsigned/` — the **unsigned** repository: every `.js` in `unsigned/` (never signed, no `.xsgn` bundled), plus its own `updates.xri` that is never signed. Scripts that must not be signed (currently `ExternalToolsLauncher.js`) live in `unsigned/`.
+
+To move a script between the two, move the `.js` between the repo root and `unsigned/` (and delete its `.xsgn` when moving it to `unsigned/`).
+
+Each repository gets a new `bcolyn-scripts[-unsigned]-<timestamp>.zip` and `updates.xri`. The timestamped filename changes on every build so CDN/proxy caches (e.g. raw.githubusercontent.com) never serve a stale zip for a new `updates.xri`; the previous zip is deleted automatically since only the latest is ever referenced.
+
+If signing the release (see below), sign the scripts *before* this step and sign `release/updates.xri` *after* it (`release-unsigned/` needs no signing). Otherwise, just commit and push `release/` and `release-unsigned/`.
 
 ## Code signing
 
-Scripts and `updates.xri` can be signed with a Certified PixInsight Developer (or local) signing identity, using [tools/SignRelease.js](tools/SignRelease.js) — a PJSR script run from inside PixInsight (**Script > Feature Scripts…**, add `tools/`, then **Script > Development > Sign Release**). It needs a `.xssk` secure signing keys file, created once via PixInsight's built-in **SigningKeys** script.
+Scripts in the repo root and `release/updates.xri` can be signed with a Certified PixInsight Developer (or local) signing identity, using [tools/SignRelease.js](tools/SignRelease.js) — a PJSR script run from inside PixInsight (**Script > Feature Scripts…**, add `tools/`, then **Script > Development > Sign Release**). It needs a `.xssk` secure signing keys file, created once via PixInsight's built-in **SigningKeys** script.
 
 Full release cycle, once a `.xssk` file exists:
 
 1. In PixInsight, run **Sign Release > Sign Scripts (.js → .xsgn)** — signs every `.js` at the repo root, writing a companion `<name>.xsgn` beside each.
 2. `python build-release.py` — bundles each `.js` together with its `.xsgn` (if present) into the zip, and writes an unsigned `updates.xri`.
 3. In PixInsight, run **Sign Release > Sign updates.xri** — signs the freshly rebuilt `updates.xri` in place (must happen *after* step 2, since the signature covers the final file contents).
-4. Commit and push `release/`.
+4. Commit and push `release/` and `release-unsigned/`.
 
 The `.xssk` file and the loose `.xsgn` files at the repo root are gitignored — never commit private key material. The `.xsgn` files only need to exist long enough for step 2 to bundle them into the zip.
 
