@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Builds two PixInsight update repositories, each a single zip package of .js
-scripts under src/scripts/bcolyn/ plus the updates.xri that describes it:
-
-  release/            signed repository   <- *.js in the repo root (+ their .xsgn)
-  release-unsigned/   unsigned repository <- *.js in unsigned/ (never signed)
+Builds the PixInsight update repository in release/: a single zip package of
+the .js scripts in the repo root (+ their .xsgn) under src/scripts/bcolyn/,
+plus the updates.xri that describes it.
 
 See: https://pixinsight.com/doc/docs/PIRepositoryReference/PIRepositoryReference.html
 
@@ -43,8 +41,6 @@ class Repo:
 
 REPOS = [
     Repo("signed", ROOT, ROOT / "release", "bcolyn-scripts", REPO_TITLE, True),
-    Repo("unsigned", ROOT / "unsigned", ROOT / "release-unsigned", "bcolyn-scripts-unsigned",
-         REPO_TITLE + " (unsigned)", False),
 ]
 
 
